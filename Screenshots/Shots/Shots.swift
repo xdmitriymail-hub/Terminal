@@ -23,7 +23,7 @@ final class Shots: XCTestCase {
 
         // The connect form — fields are found by placeholder/label.
         type(into: ["server.example.com", "Host"], "localhost")
-        type(into: ["root", "Username"], "runner")
+        type(into: ["root", "Username"], "shotbot")
         type(into: ["Optional", "Password"], "Term1n4lSh0ts", secure: true)
 
         // Tap the hero to drop focus, then connect.

@@ -71,8 +71,23 @@ jobs:
           sudo systemsetup -setremotelogin on 2>/dev/null \
             || sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null \
             || sudo launchctl bootstrap system/ /System/Library/LaunchDaemons/ssh.plist
-          sudo dscl . -passwd /Users/runner 'Term1n4lSh0ts' 2>/dev/null \
-            || printf 'Term1n4lSh0ts\nTerm1n4lSh0ts\n' | sudo dscl . -passwd /Users/runner
+          # Dedicated account: setting a password on a fresh user needs
+          # no old-password credentials (unlike changing `runner`'s).
+          if ! sudo dscl . -read /Users/shotbot >/dev/null 2>&1; then
+            sudo dscl . -create /Users/shotbot
+            sudo dscl . -create /Users/shotbot UserShell /bin/zsh
+            sudo dscl . -create /Users/shotbot RealName "Shot Bot"
+            sudo dscl . -create /Users/shotbot UniqueID 555
+            sudo dscl . -create /Users/shotbot PrimaryGroupID 20
+            sudo dscl . -create /Users/shotbot NFSHomeDirectory /Users/shotbot
+            sudo mkdir -p /Users/shotbot
+            sudo chown shotbot:staff /Users/shotbot
+            echo hello > /tmp/shotbot-marker
+            sudo cp /tmp/shotbot-marker /Users/shotbot/welcome.txt
+            sudo chown shotbot:staff /Users/shotbot/welcome.txt
+          fi
+          sudo dscl . -passwd /Users/shotbot 'Term1n4lSh0ts' \
+            || printf 'Term1n4lSh0ts\n' | sudo dscl . -passwd /Users/shotbot
           for i in 1 2 3 4 5 6 7 8 9 10; do
             nc -z 127.0.0.1 22 && break || sleep 2
           done
