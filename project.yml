@@ -64,12 +64,6 @@ targets:
         product: NIO
       - package: swift-crypto
         product: Crypto
-      - package: NIOSSH
-        product: NIOSSH
-      - package: NIO
-        product: NIO
-      - package: swift-crypto
-        product: Crypto
 
 schemes:
   Terminal:
