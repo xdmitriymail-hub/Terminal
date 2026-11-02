@@ -56,7 +56,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         guard !pendingOutput.isEmpty else { return }
         let data = pendingOutput
         pendingOutput.removeAll(keepingCapacity: true)
-        handler(data[...])
+        handler(Array(data)[...])
     }
 
     func detachOutput() {
