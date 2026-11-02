@@ -29,9 +29,10 @@ jobs:
             -project Terminal.xcodeproj \
             -scheme Terminal \
             -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
             -skipPackagePluginValidation \
             -resolvePackageDependencies
-          FILE=$(find ~/Library/Developer/Xcode/DerivedData -path '*SwiftTerm*/PowerlineRenderer.swift' | head -1)
+          FILE=$(find build ~/Library/Developer/Xcode/DerivedData -path '*SwiftTerm*/PowerlineRenderer.swift' | head -1)
           [ -n "$FILE" ] || { echo "PowerlineRenderer.swift not found"; exit 1; }
           sed -i '' 's/flameLowerPath\.dropFirst()/Array(flameLowerPath.dropFirst())/' "$FILE"
 
