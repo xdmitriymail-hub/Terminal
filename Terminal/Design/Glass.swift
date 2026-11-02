@@ -35,6 +35,16 @@ extension View {
 
 extension Color {
     static let terminalAccent = Color(red: 0.19, green: 0.82, blue: 0.35)
-    static let terminalSurface = Color(red: 0.05, green: 0.05, blue: 0.06)
-    static let terminalElevated = Color(white: 0.11)
+    /// App chrome background — follows the interface style.
+    static let terminalSurface = Color(uiColor: UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1)
+            : UIColor(red: 0.95, green: 0.95, blue: 0.97, alpha: 1)
+    })
+    /// Raised surfaces (cards, chips) — follows the interface style.
+    static let terminalElevated = Color(uiColor: UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 0.11, alpha: 1)
+            : UIColor.white
+    })
 }

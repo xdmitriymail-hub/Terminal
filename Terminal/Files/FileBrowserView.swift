@@ -170,7 +170,7 @@ private struct FileBrowserContent: View {
             }
             .buttonStyle(.plain)
             .listRowBackground(Color.clear)
-            .listRowSeparatorTint(.white.opacity(0.08))
+            .listRowSeparatorTint(Color.primary.opacity(0.08))
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 Button(role: .destructive) {
                     deleting = file
@@ -235,7 +235,7 @@ private struct FileBrowserContent: View {
                         .frame(width: 90, height: 8)
                 }
             }
-            .foregroundStyle(.white.opacity(0.06))
+            .foregroundStyle(Color.primary.opacity(0.06))
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
         }

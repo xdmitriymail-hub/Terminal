@@ -8,6 +8,8 @@ struct TerminalSurface: UIViewRepresentable {
     var fontSize: Double
     var theme: TerminalTheme
     var accessory: UIView?
+    /// Sticky Ctrl/Alt from the accessory bar — applies to typed keys.
+    var modifiers: ModifierState?
 
     func makeUIView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
@@ -15,13 +17,14 @@ struct TerminalSurface: UIViewRepresentable {
         view.terminalDelegate = context.coordinator
         view.inputAccessoryView = accessory
         view.backgroundColor = theme.uiBackground
-        context.coordinator.attach(session: session, view: view)
+        context.coordinator.attach(session: session, view: view, modifiers: modifiers)
         return view
     }
 
     func updateUIView(_ view: TerminalView, context: Context) {
         applyStyle(view)
         view.inputAccessoryView = accessory
+        context.coordinator.modifiers = modifiers
     }
 
     static func dismantleUIView(_ view: TerminalView, coordinator: Coordinator) {
@@ -43,10 +46,12 @@ struct TerminalSurface: UIViewRepresentable {
     final class Coordinator: NSObject, TerminalViewDelegate {
         private weak var session: TerminalSession?
         private weak var view: TerminalView?
+        var modifiers: ModifierState?
 
-        func attach(session: TerminalSession, view: TerminalView) {
+        func attach(session: TerminalSession, view: TerminalView, modifiers: ModifierState?) {
             self.session = session
             self.view = view
+            self.modifiers = modifiers
             session.onOutput = { [weak view] bytes in
                 view?.feed(byteArray: bytes)
             }
@@ -70,7 +75,8 @@ struct TerminalSurface: UIViewRepresentable {
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            session?.send(data)
+            let bytes = modifiers?.apply(to: Array(data)) ?? Array(data)
+            session?.send(bytes[...])
         }
 
         func scrolled(source: TerminalView, position: Double) {}

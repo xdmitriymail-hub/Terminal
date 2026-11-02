@@ -27,6 +27,10 @@ final class SessionEngine: ObservableObject {
     /// Set by UI layer: surface an error as a gentle alert.
     var onError: (@MainActor (String) -> Void)?
 
+    /// Set by UI layer: a session needs the password it doesn't have —
+    /// ask the user, store it, then let the session retry.
+    var onAuthNeeded: (@MainActor (TerminalSession) -> Void)?
+
     init(profiles: ProfilesStore, keys: KeysStore, knownHosts: KnownHostsStore, settings: SettingsStore) {
         self.profiles = profiles
         self.keys = keys
@@ -86,7 +90,11 @@ final class SessionEngine: ObservableObject {
     private func buildAuth(for profile: ServerProfile) async throws -> SSHAuthenticationMethod {
         switch profile.auth {
         case .password:
-            let password = Keychain.loadString(tag: "password.\(profile.id.uuidString)") ?? ""
+            // Never ship an empty password — the caller prompts first.
+            guard let password = Keychain.loadString(tag: "password.\(profile.id.uuidString)"),
+                  !password.isEmpty else {
+                throw KeyVaultError.keyMaterialMissing
+            }
             return .passwordBased(username: profile.username, password: password)
         case .key(let keyID):
             guard let stored = keys.key(id: keyID) else {
@@ -203,6 +211,7 @@ final class SessionEngine: ObservableObject {
                 await conn.markDisconnected()
             }
         }
+        guard settings.settings.autoReconnect else { return }
         for session in sessions where session.wantsReconnect {
             await session.reconnectIfNeeded()
         }

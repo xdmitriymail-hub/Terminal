@@ -44,7 +44,7 @@ struct SessionGridView: View {
                             .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(.secondary)
                             .padding(7)
-                            .background(.white.opacity(0.1), in: Circle())
+                            .background(Color.primary.opacity(0.1), in: Circle())
                     }
                 }
             }
@@ -74,7 +74,7 @@ private struct SessionCardView: View {
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.secondary)
                         .padding(5)
-                        .background(.white.opacity(0.12), in: Circle())
+                        .background(Color.primary.opacity(0.12), in: Circle())
                 }
                 .buttonStyle(.plain)
             }

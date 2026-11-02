@@ -1,16 +1,62 @@
 import UIKit
 
-/// Terminal keyboard accessory: Esc / Tab / Ctrl-chord / arrows / symbols.
-/// Glass bar, monospace keys, no labels beyond glyphs.
+/// Sticky Ctrl / Alt state shared between the accessory bar and the
+/// terminal input path: tapping Ctrl, then a letter, sends a control
+/// byte; Alt sends an ESC prefix (Meta).
+final class ModifierState {
+    private(set) var ctrl = false
+    private(set) var alt = false
+    var onChange: () -> Void = {}
+
+    func toggleCtrl() { ctrl.toggle(); alt = false; onChange() }
+    func toggleAlt() { alt.toggle(); ctrl = false; onChange() }
+
+    /// Applies the held modifiers to typed bytes. One-shot: modifiers
+    /// reset after a single key, like a hardware chord.
+    func apply(to bytes: [UInt8]) -> [UInt8] {
+        if ctrl {
+            let out = bytes.map { $0 & 0x1f }
+            reset()
+            return out
+        }
+        if alt {
+            var out: [UInt8] = [0x1B]
+            out.append(contentsOf: bytes)
+            reset()
+            return out
+        }
+        return bytes
+    }
+
+    /// Escape-sequence variant for special keys (arrows etc.) that are
+    /// already CSI — Ctrl+arrow becomes CSI 1;5X.
+    func arrow(_ code: String) -> [UInt8] {
+        let seq = ctrl ? "\u{1B}[1;5\(code)" : "\u{1B}[\(code)"
+        reset()
+        return [UInt8](seq.utf8)
+    }
+
+    func reset() {
+        guard ctrl || alt else { return }
+        ctrl = false
+        alt = false
+        onChange()
+    }
+}
+
+/// Terminal keyboard bar: modifier keys, arrows, symbols, hide button.
+/// Material adapts to light/dark; flush with the keyboard — no gaps.
 final class KeyboardAccessoryView: UIInputView {
 
+    let modifiers = ModifierState()
     var onSend: ([UInt8]) -> Void = { _ in }
 
-    private var ctrlActive = false
     private var ctrlButton: KeyButton?
+    private var altButton: KeyButton?
 
     init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 44), inputViewStyle: .keyboard)
+        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 46), inputViewStyle: .keyboard)
+        modifiers.onChange = { [weak self] in self?.syncModifiers() }
         build()
     }
 
@@ -18,7 +64,7 @@ final class KeyboardAccessoryView: UIInputView {
 
     private func build() {
         backgroundColor = .clear
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
         blur.translatesAutoresizingMaskIntoConstraints = false
         addSubview(blur)
         NSLayoutConstraint.activate([
@@ -46,40 +92,45 @@ final class KeyboardAccessoryView: UIInputView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -8),
-            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 5),
-            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -5),
-            stack.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor, constant: -10)
+            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -6),
+            stack.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor, constant: -12)
         ])
 
-        stack.addArrangedSubview(key("esc", glyph: "escape") { [weak self] in self?.emit([0x1B]) })
-        let ctrl = key("ctrl", glyph: "control") { [weak self] in self?.toggleCtrl() }
+        stack.addArrangedSubview(key("esc") { [weak self] in self?.emit([0x1B]) })
+        let ctrl = key("ctrl") { [weak self] in self?.modifiers.toggleCtrl(); Haptics.select() }
         ctrlButton = ctrl
         stack.addArrangedSubview(ctrl)
+        let alt = key("alt") { [weak self] in self?.modifiers.toggleAlt(); Haptics.select() }
+        altButton = alt
+        stack.addArrangedSubview(alt)
         stack.addArrangedSubview(key("tab", glyph: "arrow.right.to.line") { [weak self] in self?.emit([0x09]) })
 
         stack.addArrangedSubview(sep())
 
-        for symbol in ["|", "/", "-", "~", "_", "=", "`", "$", "&", "*"] {
+        stack.addArrangedSubview(key("left", glyph: "chevron.left") { [weak self] in self?.emitArrow("D") })
+        stack.addArrangedSubview(key("down", glyph: "chevron.down") { [weak self] in self?.emitArrow("B") })
+        stack.addArrangedSubview(key("up", glyph: "chevron.up") { [weak self] in self?.emitArrow("A") })
+        stack.addArrangedSubview(key("right", glyph: "chevron.right") { [weak self] in self?.emitArrow("C") })
+
+        stack.addArrangedSubview(sep())
+
+        for symbol in ["`", "|", "/", "-", "~", "_", "=", "&", "$"] {
             stack.addArrangedSubview(key(symbol) { [weak self] in self?.emitString(symbol) })
         }
 
         stack.addArrangedSubview(sep())
 
-        stack.addArrangedSubview(key("home", glyph: "arrowtriangle.left.fill") { [weak self] in self?.emitCSI("H") })
-        stack.addArrangedSubview(key("up", glyph: "chevron.up") { [weak self] in self?.emitArrow("A") })
-        stack.addArrangedSubview(key("down", glyph: "chevron.down") { [weak self] in self?.emitArrow("B") })
-        stack.addArrangedSubview(key("left", glyph: "chevron.left") { [weak self] in self?.emitArrow("D") })
-        stack.addArrangedSubview(key("right", glyph: "chevron.right") { [weak self] in self?.emitArrow("C") })
-        stack.addArrangedSubview(key("end", glyph: "arrowtriangle.right.fill") { [weak self] in self?.emitCSI("F") })
+        stack.addArrangedSubview(key("home", glyph: "arrowtriangle.left.fill") { [weak self] in self?.emitString("\u{1B}[H") })
+        stack.addArrangedSubview(key("end", glyph: "arrowtriangle.right.fill") { [weak self] in self?.emitString("\u{1B}[F") })
 
         stack.addArrangedSubview(sep())
 
-        // Ctrl chord row — letters send control bytes while ctrl is held
-        for letter in ["c", "d", "z", "l", "a", "e", "k", "u", "w", "r", "x"] {
-            stack.addArrangedSubview(key(letter) { [weak self] in self?.emitLetter(letter) })
-        }
+        stack.addArrangedSubview(key("hide", glyph: "keyboard.chevron.compact.down") {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        })
     }
 
     private func key(_ title: String, glyph: String? = nil, action: @escaping () -> Void) -> KeyButton {
@@ -94,75 +145,63 @@ final class KeyboardAccessoryView: UIInputView {
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             view.widthAnchor.constraint(equalToConstant: 0.5),
-            view.heightAnchor.constraint(equalToConstant: 22)
+            view.heightAnchor.constraint(equalToConstant: 24)
         ])
         return view
     }
 
-    private func toggleCtrl() {
-        ctrlActive.toggle()
-        ctrlButton?.isToggled = ctrlActive
-        Haptics.select()
+    private func syncModifiers() {
+        ctrlButton?.isToggled = modifiers.ctrl
+        altButton?.isToggled = modifiers.alt
     }
 
     private func emit(_ bytes: [UInt8]) {
+        modifiers.reset()
         onSend(bytes)
     }
 
     private func emitString(_ s: String) {
+        modifiers.reset()
         onSend([UInt8](s.utf8))
     }
 
-    private func emitLetter(_ letter: String) {
-        guard let byte = letter.utf8.first else { return }
-        if ctrlActive {
-            onSend([byte & 0x1f])
-            toggleCtrl()
-        } else {
-            onSend([byte])
-        }
-    }
-
     private func emitArrow(_ code: String) {
-        if ctrlActive {
-            emitString("\u{1B}[1;5\(code)")
-            toggleCtrl()
-        } else {
-            emitString("\u{1B}[\(code)")
-        }
-    }
-
-    private func emitCSI(_ code: String) {
-        emitString("\u{1B}[\(code)")
+        onSend(modifiers.arrow(code))
     }
 }
 
-/// A single accessory key — squircle chip, monospace, pressed animation.
+/// A single accessory key — keycap chip, adapts to light/dark.
 final class KeyButton: UIControl {
     var onTap: () -> Void = {}
     var isToggled = false {
         didSet { updateStyle() }
     }
 
-    private let label = UILabel()
+    private static let fill = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor.white.withAlphaComponent(0.12)
+            : UIColor.white.withAlphaComponent(0.85)
+    }
+    private static let fillPressed = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor.white.withAlphaComponent(0.28)
+            : UIColor.white.withAlphaComponent(0.45)
+    }
 
     init(title: String, glyph: String? = nil) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        backgroundColor = UIColor.white.withAlphaComponent(0.08)
-        layer.cornerRadius = 7
+        backgroundColor = Self.fill
+        layer.cornerRadius = 8
         layer.cornerCurve = .continuous
-
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.textColor = .white
-        label.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
-        label.textAlignment = .center
-        label.isUserInteractionEnabled = false
-        addSubview(label)
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.15
+        layer.shadowRadius = 0
+        layer.shadowOffset = CGSize(width: 0, height: 1)
 
         if let glyph, let image = UIImage(systemName: glyph) {
             let imageView = UIImageView(image: image)
-            imageView.tintColor = .white
+            imageView.tintColor = .label
             imageView.contentMode = .scaleAspectFit
             imageView.translatesAutoresizingMaskIntoConstraints = false
             imageView.isUserInteractionEnabled = false
@@ -173,7 +212,14 @@ final class KeyButton: UIControl {
                 imageView.heightAnchor.constraint(equalToConstant: 15)
             ])
         } else {
+            let label = UILabel()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.textColor = .label
+            label.font = .monospacedSystemFont(ofSize: 14, weight: .medium)
+            label.textAlignment = .center
             label.text = title
+            label.isUserInteractionEnabled = false
+            addSubview(label)
             NSLayoutConstraint.activate([
                 label.centerXAnchor.constraint(equalTo: centerXAnchor),
                 label.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -181,7 +227,7 @@ final class KeyButton: UIControl {
         }
 
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(greaterThanOrEqualToConstant: 34),
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 38),
             heightAnchor.constraint(equalToConstant: 34)
         ])
 
@@ -198,11 +244,9 @@ final class KeyButton: UIControl {
 
     private func updateStyle() {
         if isToggled {
-            backgroundColor = UIColor(red: 0.19, green: 0.82, blue: 0.35, alpha: 0.35)
+            backgroundColor = UIColor(red: 0.19, green: 0.82, blue: 0.35, alpha: 0.4)
         } else {
-            backgroundColor = isHighlighted
-                ? UIColor.white.withAlphaComponent(0.25)
-                : UIColor.white.withAlphaComponent(0.08)
+            backgroundColor = isHighlighted ? Self.fillPressed : Self.fill
         }
     }
 

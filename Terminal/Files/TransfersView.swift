@@ -15,7 +15,7 @@ struct TransfersView: View {
                     List(manager.transfers) { transfer in
                         row(transfer)
                             .listRowBackground(Color.clear)
-                            .listRowSeparatorTint(.white.opacity(0.08))
+                            .listRowSeparatorTint(Color.primary.opacity(0.08))
                             .swipeActions(edge: .trailing) {
                                 if transfer.state != .running {
                                     Button(role: .destructive) {

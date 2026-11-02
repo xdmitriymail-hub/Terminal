@@ -62,6 +62,12 @@ actor SSHConnection {
             setState(.connecting)
             do {
                 let connected = try await performConnect()
+                // Cancelled mid-handshake (tab closed): adopt nothing —
+                // the just-finished transport would become an orphan.
+                if Task.isCancelled {
+                    Task { try? await connected.close() }
+                    throw CancellationError()
+                }
                 client = connected
                 setState(.online)
                 return connected

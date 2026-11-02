@@ -61,7 +61,13 @@ final class TerminalSession: ObservableObject, Identifiable {
             await reattachIfNeeded()
         } catch {
             state = .failed(Self.describe(error))
-            engine?.reportError(Self.describe(error))
+            // Missing password isn't a failure worth an alert — ask the
+            // user for it, then retry through the same session.
+            if case KeyVaultError.keyMaterialMissing = error, case .password = profile.auth {
+                engine?.onAuthNeeded?(self)
+            } else {
+                engine?.reportError(Self.describe(error))
+            }
         }
     }
 
@@ -150,11 +156,18 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     func terminate() {
+        // An in-flight handshake must die with the tab — otherwise it
+        // completes later and leaves a zombie transport behind. A live
+        // connection is shared, so it's left alone.
+        let midConnect = state == .connecting || state == .reconnecting
         consumeTask?.cancel()
         consumeTask = nil
         shell?.close()
         shell = nil
         state = .offline
+        if midConnect {
+            Task { await connection.markDisconnected() }
+        }
     }
 
     /// One short human phrase per failure class — never raw error text.

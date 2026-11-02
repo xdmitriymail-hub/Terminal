@@ -65,8 +65,16 @@ struct SettingsView: View {
                         Haptics.setEnabled(on)
                     }
 
+                    Toggle(isOn: $settings.settings.autoReconnect) {
+                        rowLabel("Auto-reconnect", icon: "arrow.triangle.2.circlepath")
+                    }
+
                     Toggle(isOn: $settings.settings.autoTmux) {
                         rowLabel("Sessions persist", icon: "clock.arrow.circlepath")
+                    }
+
+                    Toggle(isOn: $settings.settings.showKeyboardBar) {
+                        rowLabel("Extra keys", icon: "keyboard")
                     }
 
                     LabeledContent {

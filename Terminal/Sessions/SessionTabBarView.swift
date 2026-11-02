@@ -41,7 +41,7 @@ struct SessionTabBarView: View {
                     Image(systemName: "plus")
                         .font(.system(size: 14, weight: .semibold))
                         .frame(width: 32, height: 32)
-                        .background(.white.opacity(0.09), in: Circle())
+                        .background(Color.primary.opacity(0.09), in: Circle())
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -53,7 +53,7 @@ struct SessionTabBarView: View {
                     Image(systemName: "square.grid.2x2")
                         .font(.system(size: 13, weight: .semibold))
                         .frame(width: 32, height: 32)
-                        .background(.white.opacity(0.09), in: Circle())
+                        .background(Color.primary.opacity(0.09), in: Circle())
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -91,7 +91,7 @@ private struct SessionPillView: View {
             .frame(height: 34)
             .background(
                 Capsule(style: .continuous)
-                    .fill(.white.opacity(isActive ? 0.16 : 0))
+                    .fill(Color.primary.opacity(isActive ? 0.16 : 0))
             )
             .contentShape(Capsule())
         }

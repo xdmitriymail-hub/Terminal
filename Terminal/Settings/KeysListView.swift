@@ -76,7 +76,7 @@ struct KeysListView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(.white.opacity(0.08), in: Capsule())
+                        .background(Color.primary.opacity(0.08), in: Capsule())
                     if key.inSecureEnclave {
                         Image(systemName: "cpu")
                             .font(.caption2)
@@ -139,7 +139,7 @@ private struct KeyDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(.white.opacity(0.08), in: Capsule())
+                            .background(Color.primary.opacity(0.08), in: Capsule())
                         if key.inSecureEnclave {
                             Image(systemName: "cpu")
                                 .font(.caption)
@@ -190,7 +190,7 @@ private struct KeyDetailView: View {
                             .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(.secondary)
                             .padding(7)
-                            .background(.white.opacity(0.1), in: Circle())
+                            .background(Color.primary.opacity(0.1), in: Circle())
                     }
                 }
             }

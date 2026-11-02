@@ -4,12 +4,15 @@ import SwiftUI
 /// host-key trust prompt shared by all connections.
 struct RootView: View {
     @EnvironmentObject var engine: SessionEngine
+    @AppStorage("onboarding.done") private var onboardingDone = false
 
     @State private var showSessionPicker = false
     @State private var showGrid = false
     @State private var showFilesFor: ServerProfile?
     @State private var showForwardsFor: ServerProfile?
     @State private var errorMessage: String?
+    @State private var passwordSession: TerminalSession?
+    @State private var passwordText = ""
 
     // Host key prompt plumbing — a queue: parallel connects (e.g.
     // bastion + target) must not clobber a pending prompt's continuation.
@@ -23,6 +26,13 @@ struct RootView: View {
                 HostsListView()
             } else {
                 workspace
+            }
+            // Inline, not a cover — host-key and password prompts must
+            // be able to appear above it during the first connect.
+            if !onboardingDone && engine.sessions.isEmpty {
+                OnboardingView()
+                    .transition(.opacity)
+                    .zIndex(1)
             }
         }
         .sheet(isPresented: $showSessionPicker) {
@@ -44,6 +54,18 @@ struct RootView: View {
         .alert(errorMessage ?? "", isPresented: errorPresented) {
             Button("OK") { errorMessage = nil }
         }
+        .alert(
+            "Password",
+            isPresented: passwordPromptPresented,
+            presenting: passwordSession
+        ) { session in
+            SecureField(session.profile.endpoint, text: $passwordText)
+            Button("Connect") { submitPassword() }
+            Button("Cancel", role: .cancel) {
+                passwordSession = nil
+                passwordText = ""
+            }
+        }
         .confirmationDialog(
             pendingHostKey.map { _ in "" } ?? "",
             isPresented: hostKeyPromptPresented,
@@ -60,9 +82,9 @@ struct RootView: View {
             engine.onError = { message in
                 errorMessage = message
             }
-        }
-        .fullScreenCover(isPresented: needsOnboarding) {
-            OnboardingView()
+            engine.onAuthNeeded = { session in
+                passwordSession = session
+            }
         }
     }
 
@@ -156,14 +178,23 @@ struct RootView: View {
         )
     }
 
-    private var needsOnboarding: Binding<Bool> {
+    private var passwordPromptPresented: Binding<Bool> {
         Binding(
-            // Read fresh each time — a successful connect also flips it.
-            get: { !UserDefaults.standard.bool(forKey: "onboarding.done") && engine.sessions.isEmpty },
-            set: { _ in
-                UserDefaults.standard.set(true, forKey: "onboarding.done")
-            }
+            get: { passwordSession != nil },
+            set: { if !$0 { passwordSession = nil; passwordText = "" } }
         )
+    }
+
+    /// Stores the entered password for the profile and retries the
+    /// same session — no second trip through the server list.
+    private func submitPassword() {
+        guard let session = passwordSession else { return }
+        let text = passwordText
+        passwordSession = nil
+        passwordText = ""
+        guard !text.isEmpty else { return }
+        Keychain.save(text, tag: "password.\(session.profile.id.uuidString)")
+        Task { await session.reconnect() }
     }
 
     // MARK: - Host key prompt
@@ -241,7 +272,7 @@ struct SessionPickerSheet: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Color.black.ignoresSafeArea())
+            .background(Color.terminalSurface.ignoresSafeArea())
             .overlay {
                 if profiles.profiles.isEmpty {
                     EmptyState(symbol: "server.rack", text: nil)
@@ -258,7 +289,7 @@ struct SessionPickerSheet: View {
                             .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(.secondary)
                             .padding(7)
-                            .background(.white.opacity(0.1), in: Circle())
+                            .background(Color.primary.opacity(0.1), in: Circle())
                     }
                 }
             }
