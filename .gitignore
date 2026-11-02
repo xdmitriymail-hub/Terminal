@@ -1,0 +1,23 @@
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+build/
+.swiftpm/
+
+# Secrets — never commit
+github_api_key.txt
+*.p12
+*.mobileprovision
+*.pem
+*.key
+secrets/
+
+# OS
+.DS_Store
+
+# Build artifacts
+*.ipa
+*.tipa
+Payload/

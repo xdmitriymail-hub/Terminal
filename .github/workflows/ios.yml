@@ -1,0 +1,73 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  release:
+    types: [created]
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen
+
+      - name: Cache packages
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/Terminal-*/SourcePackages
+          key: spm-${{ hashFiles('project.yml') }}-${{ runner.os }}
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild \
+            -project Terminal.xcodeproj \
+            -scheme Terminal \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Terminal.xcarchive \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package IPA + TIPA
+        run: |
+          mkdir -p Payload
+          cp -R "build/Terminal.xcarchive/Products/Applications/Terminal.app" Payload/
+          zip -qry Terminal.ipa Payload
+          cp Terminal.ipa Terminal.tipa
+          ls -lh Terminal.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Terminal-ipa
+          path: |
+            Terminal.ipa
+            Terminal.tipa
+          retention-days: 30
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Terminal.ipa
+            Terminal.tipa

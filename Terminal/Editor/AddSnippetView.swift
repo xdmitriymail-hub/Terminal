@@ -1,0 +1,74 @@
+import SwiftUI
+
+/// Add or edit a snippet: a title, the command itself, and whether a
+/// tap should also press Return. Pass a `Snippet` to edit it.
+struct AddSnippetView: View {
+    @EnvironmentObject private var snippets: SnippetsStore
+    @Environment(\.dismiss) private var dismiss
+
+    private let existing: Snippet?
+    @State private var title: String
+    @State private var command: String
+    @State private var autoEnter: Bool
+
+    init(snippet: Snippet? = nil) {
+        existing = snippet
+        _title = State(initialValue: snippet?.title ?? "")
+        _command = State(initialValue: snippet?.command ?? "")
+        _autoEnter = State(initialValue: snippet?.autoEnter ?? false)
+    }
+
+    private var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Title", text: $title)
+                        .autocorrectionDisabled()
+                }
+                Section {
+                    TextField("Command", text: $command, axis: .vertical)
+                        .font(.system(.body, design: .monospaced))
+                        .lineLimit(1...6)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.asciiCapable)
+                }
+                Section {
+                    Toggle(isOn: $autoEnter) {
+                        Label("Press Return", systemImage: "return")
+                    }
+                    .tint(.terminalAccent)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Color.terminalSurface.ignoresSafeArea())
+            .navigationTitle(existing == nil ? "New Snippet" : "Edit Snippet")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { save() }
+                        .disabled(!canSave)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func save() {
+        var snippet = existing ?? Snippet()
+        snippet.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        snippet.command = command
+        snippet.autoEnter = autoEnter
+        snippets.save(snippet)
+        Haptics.connected()
+        dismiss()
+    }
+}
