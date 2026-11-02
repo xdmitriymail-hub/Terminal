@@ -149,7 +149,7 @@ struct AddServerView: View {
             return
         }
 
-        let newAuth: ServerProfile.Auth
+        let newAuth: ServerProfile.AuthMethod
         if useKey {
             guard let selectedKeyID else {
                 Haptics.failed()

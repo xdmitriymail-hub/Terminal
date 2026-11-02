@@ -104,7 +104,7 @@ actor ShellChannel {
         }
 
         do {
-            try await withTimeout(.seconds(15)) { try await waitReady() }
+            try await withTimeout(.seconds(15)) { try await self.waitReady() }
         } catch {
             task?.cancel()
             finish(error)

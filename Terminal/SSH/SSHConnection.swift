@@ -94,7 +94,8 @@ actor SSHConnection {
                 // Cancelled mid-handshake or superseded by a newer
                 // generation: adopt nothing — the finished transport
                 // would become an orphan.
-                if Task.isCancelled || await self.isStale(gen) {
+                let stale = await self.isStale(gen)
+                if Task.isCancelled || stale {
                     Task { try? await connected.close() }
                     throw CancellationError()
                 }

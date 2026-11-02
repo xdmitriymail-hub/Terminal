@@ -369,7 +369,7 @@ final class PortForwardService: ObservableObject {
             // must not hang stop()/stopAll() forever, so the wait is
             // bounded — cancel still landed, just unconfirmed.
             try? await withTimeout(.seconds(5)) {
-                await cancelListener(listener)
+                await self.cancelListener(listener)
             }
         }
         if let task = entry.task {
@@ -482,7 +482,7 @@ final class PortForwardService: ObservableObject {
             defer { forgetAccepted(connID) }
             do {
                 let client = try await withTimeout(Self.handshakeTimeout) {
-                    try await connection.ensureConnected()
+                    try await self.connection.ensureConnected()
                 }
                 var peerPort = 0
                 if case .hostPort(_, let port) = nw.endpoint { peerPort = Int(port.rawValue) }
@@ -598,7 +598,7 @@ final class PortForwardService: ObservableObject {
                 negotiated = true
                 failureRep = 0x01   // transport/SSH-level failure
                 let client = try await withTimeout(Self.handshakeTimeout) {
-                    try await connection.ensureConnected()
+                    try await self.connection.ensureConnected()
                 }
                 let origin = try SocketAddress(ipAddress: "127.0.0.1", port: 0)
                 let bridge = NIOToNWBridge(nw: nw, gated: true) { [weak self] in

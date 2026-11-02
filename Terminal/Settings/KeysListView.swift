@@ -293,8 +293,8 @@ private struct KeyDetailView: View {
             .onDisappear {
                 exportTask?.cancel()
                 exportTask = nil
-                if let exportedURL {
-                    try? FileManager.default.removeItem(at: exportedURL)
+                if let url = exportedURL {
+                    try? FileManager.default.removeItem(at: url)
                     exportedURL = nil
                 }
             }
