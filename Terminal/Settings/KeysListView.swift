@@ -152,7 +152,7 @@ private struct KeyDetailView: View {
                         }
                     }
 
-                    Text(Self.publicKeyBody(key.publicKeyOpenSSH))
+                    Text(KeysListView.publicKeyBody(key.publicKeyOpenSSH))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)

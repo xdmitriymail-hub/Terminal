@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import Citadel
 import NIO
 import NIOSSH
@@ -76,7 +75,7 @@ actor SSHConnection {
     }
 
     private func performConnect() async throws -> Citadel.SSHClient {
-        let auth = preparedAuth ?? .passwordBased(username: profile.username, password: "")
+        guard let auth = preparedAuth else { throw KeyVaultError.keyMaterialMissing }
         let validator = await validatorFor(profile.host, profile.port)
 
         var settings = SSHClientSettings(

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// Upload/download queue, shared app-wide. Transfers keep running while

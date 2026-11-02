@@ -44,6 +44,10 @@ struct SSHWireReader {
 struct SSHWireWriter {
     private(set) var data = Data()
 
+    mutating func writeByte(_ byte: UInt8) {
+        data.append(byte)
+    }
+
     mutating func writeUInt32(_ value: UInt32) {
         var big = value.bigEndian
         data.append(Data(bytes: &big, count: 4))

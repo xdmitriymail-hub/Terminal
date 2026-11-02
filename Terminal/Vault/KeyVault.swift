@@ -213,7 +213,7 @@ enum KeyVault {
         // pad to block size 8 with 1,2,3...
         let padCount = 8 - (inner.data.count % 8)
         for i in 1...padCount {
-            inner.data.append(UInt8(i))
+            inner.writeByte(UInt8(i))
         }
 
         var outer = Data("openssh-key-v1\0".utf8)
