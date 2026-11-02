@@ -130,7 +130,7 @@ final class FileBrowserViewModel: ObservableObject {
             evict()
             do {
                 files = try await attemptList()
-                error = nil
+                self.error = nil
                 return
             } catch {}
             // Folder may be gone — fall back to home before giving up.
@@ -138,7 +138,7 @@ final class FileBrowserViewModel: ObservableObject {
                 path = home
                 do {
                     files = try await attemptList()
-                    error = nil
+                    self.error = nil
                     return
                 } catch {}
             }

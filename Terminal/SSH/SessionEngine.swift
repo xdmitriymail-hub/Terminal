@@ -53,15 +53,15 @@ final class SessionEngine: ObservableObject {
                 return await self.makeValidator(host: host, port: port)
             },
             bastionResolver: { [weak self] jumpID in
-                guard let self, let jumpProfile = self.profiles.profiles.first(where: { $0.id == jumpID }) else {
+                guard let self, let jumpProfile = await self.profiles.profiles.first(where: { $0.id == jumpID }) else {
                     throw SSHClientError.channelCreationFailed
                 }
                 // A jump chain that loops back to this profile would
                 // recurse forever — break it before connecting.
-                guard !self.jumpChainLoops(from: jumpProfile, backTo: profile.id) else {
+                guard await !self.jumpChainLoops(from: jumpProfile, backTo: profile.id) else {
                     throw SSHClientError.channelCreationFailed
                 }
-                return self.connection(for: jumpProfile)
+                return await self.connection(for: jumpProfile)
             },
             onStateChange: { _ in }
         )

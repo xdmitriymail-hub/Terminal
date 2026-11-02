@@ -7,7 +7,11 @@ struct StatusDot: View {
     }
 
     let state: State
-    @State private var pulse = false
+    @SwiftUI.State private var pulse = false
+
+    init(state: State) {
+        self.state = state
+    }
 
     private var color: Color {
         switch state {

@@ -31,22 +31,24 @@ final class SFTPService: @unchecked Sendable {
     }
 
     func list(path: String) async throws -> [RemoteFile] {
-        try await sftp.listDirectory(atPath: path).map { name in
-            let perms = name.attributes.permissions
-            let isDir = perms.map { ($0 & 0o170000) == 0o040000 } ?? name.filename.hasSuffix("/")
-            var modified: Date?
-            if let amtime = name.attributes.accessModificationTime {
-                modified = amtime.modificationTime
+        try await sftp.listDirectory(atPath: path)
+            .flatMap(\.components)
+            .map { entry in
+                let perms = entry.attributes.permissions
+                let isDir = perms.map { ($0 & 0o170000) == 0o040000 } ?? entry.filename.hasSuffix("/")
+                var modified: Date?
+                if let amtime = entry.attributes.accessModificationTime {
+                    modified = amtime.modificationTime
+                }
+                return RemoteFile(
+                    name: entry.filename,
+                    path: (path as NSString).appendingPathComponent(entry.filename),
+                    isDirectory: isDir,
+                    size: entry.attributes.size,
+                    permissions: perms,
+                    modified: modified
+                )
             }
-            return RemoteFile(
-                name: name.filename,
-                path: (path as NSString).appendingPathComponent(name.filename),
-                isDirectory: isDir,
-                size: name.attributes.size,
-                permissions: perms,
-                modified: modified
-            )
-        }
     }
 
     func mkdir(path: String) async throws {

@@ -33,6 +33,48 @@ private struct FileBrowserContent: View {
     }
 
     var body: some View {
+        base
+            .sheet(item: $preview) { file in
+                FilePreviewView(file: file, vm: vm)
+            }
+            .sheet(item: $chmodTarget) { file in
+                PermissionsSheet(file: file) { perm in
+                    Task { await vm.chmod(file: file, perm: perm) }
+                }
+            }
+            .sheet(isPresented: $showTransfers) {
+                TransfersView()
+            }
+            .fileImporter(isPresented: $showImporter, types: [.item]) { result in
+                handleImport(result)
+            }
+            .alert("New Folder", isPresented: $showNewFolder) {
+                TextField("Name", text: $newFolderName)
+                Button("Create") {
+                    Task { await vm.makeDir(name: newFolderName) }
+                }
+                .disabled(newFolderName.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Cancel", role: .cancel) {}
+            }
+            .alert("Rename", isPresented: renamePresented, presenting: renaming) { file in
+                TextField("Name", text: $renameText)
+                Button("Save") {
+                    Task { await vm.rename(file: file, to: renameText) }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .alert("Delete \(deleting?.name ?? "")?", isPresented: deletePresented, presenting: deleting) { file in
+                Button("Delete", role: .destructive) {
+                    Task { await vm.delete(file: file) }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .alert(vm.error ?? "", isPresented: errorAlertPresented) {
+                Button("OK") { vm.error = nil }
+            }
+    }
+
+    private var base: some View {
         VStack(spacing: 0) {
             breadcrumbBar
             content
@@ -51,44 +93,6 @@ private struct FileBrowserContent: View {
         .onChange(of: showTransfers) { _, shown in
             // Pick up freshly uploaded files when the queue sheet closes.
             if !shown { Task { await vm.reload() } }
-        }
-        .sheet(item: $preview) { file in
-            FilePreviewView(file: file, vm: vm)
-        }
-        .sheet(item: $chmodTarget) { file in
-            PermissionsSheet(file: file) { perm in
-                Task { await vm.chmod(file: file, perm: perm) }
-            }
-        }
-        .sheet(isPresented: $showTransfers) {
-            TransfersView()
-        }
-        .fileImporter(isPresented: $showImporter, types: [.item]) { result in
-            handleImport(result)
-        }
-        .alert("New Folder", isPresented: $showNewFolder) {
-            TextField("Name", text: $newFolderName)
-            Button("Create") {
-                Task { await vm.makeDir(name: newFolderName) }
-            }
-            .disabled(newFolderName.trimmingCharacters(in: .whitespaces).isEmpty)
-            Button("Cancel", role: .cancel) {}
-        }
-        .alert("Rename", isPresented: renamePresented, presenting: renaming) { file in
-            TextField("Name", text: $renameText)
-            Button("Save") {
-                Task { await vm.rename(file: file, to: renameText) }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .alert("Delete \(deleting?.name ?? "")?", isPresented: deletePresented, presenting: deleting) { file in
-            Button("Delete", role: .destructive) {
-                Task { await vm.delete(file: file) }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .alert(vm.error ?? "", isPresented: errorAlertPresented) {
-            Button("OK") { vm.error = nil }
         }
     }
 

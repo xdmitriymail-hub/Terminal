@@ -128,7 +128,9 @@ final class PortForwardService: ObservableObject {
         nw.start(queue: DispatchQueue(label: "fwd-conn"))
         do {
             let client = try await connection.ensureConnected()
-            let origin = try SocketAddress(ipAddress: "127.0.0.1", port: Int(nw.endpoint.port?.rawValue ?? 0))
+            var peerPort = 0
+            if case .hostPort(_, let port) = nw.endpoint { peerPort = Int(port.rawValue) }
+            let origin = try SocketAddress(ipAddress: "127.0.0.1", port: peerPort)
             _ = try await client.createDirectTCPIPChannel(
                 using: SSHChannelType.DirectTCPIP(
                     targetHost: rule.targetHost,

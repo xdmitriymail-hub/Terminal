@@ -88,15 +88,15 @@ final class TerminalSession: ObservableObject, Identifiable {
                 }
             } catch {
                 await MainActor.run {
-                    self.state = .failed(Self.describe(error))
+                    self?.state = .failed(Self.describe(error))
                 }
                 return
             }
             // Stream ended without a .closed event (shouldn't happen,
             // but never leave a stale "online" state behind).
             await MainActor.run {
-                if self.state == .online || self.state == .reconnecting {
-                    self.state = .offline
+                if self?.state == .online || self?.state == .reconnecting {
+                    self?.state = .offline
                 }
             }
         }
