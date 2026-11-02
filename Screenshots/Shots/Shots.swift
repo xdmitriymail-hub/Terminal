@@ -2,10 +2,9 @@ import XCTest
 import UIKit
 
 /// Drives the real app through its screens while the workflow takes
-/// `simctl io` screenshots. Sync: the test prints `SHOT:<name>` to the
-/// log, then blocks until the workflow writes `DONE:<name>` to the
-/// simulator pasteboard (`simctl pbcopy`). `APPEAR:light` asks the
-/// workflow to switch simulator appearance first.
+/// `simctl io` screenshots. Sync is one-way: the test prints
+/// `SHOT:<name>` / `APPEAR:light` to the runner log, then holds the
+/// state for a fixed window so the capture always lands inside it.
 final class Shots: XCTestCase {
 
     private var app: XCUIApplication!
@@ -20,12 +19,12 @@ final class Shots: XCTestCase {
     func testFlow() {
         app.launch()
         nap(5)
-        checkpoint("01-onboarding")
+        shot("01-onboarding")
 
         // The connect form — fields are found by placeholder/label.
-        type(into: ["server.example.com", "Host"], "test.rebex.net")
-        type(into: ["root", "Username"], "demo")
-        type(into: ["Optional", "Password"], "password", secure: true)
+        type(into: ["server.example.com", "Host"], "localhost")
+        type(into: ["root", "Username"], "runner")
+        type(into: ["Optional", "Password"], "Term1n4lSh0ts", secure: true)
 
         // Tap the hero to drop focus, then connect.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
@@ -34,23 +33,37 @@ final class Shots: XCTestCase {
 
         // Host-key trust dialog.
         let trust = app.buttons["Trust"].firstMatch
-        _ = trust.waitForExistence(timeout: 60)
-        trust.tap()
+        if trust.waitForExistence(timeout: 60) {
+            nap(2)
+            trust.tap()
+        } else {
+            NSLog("NO-TRUST-DIALOG")
+        }
 
-        nap(18)
-        checkpoint("02-terminal")
+        nap(20)
+        shot("02-terminal")
 
         // Summon the keyboard to show the accessory bar.
         app.descendants(matching: .any)["terminalSurface"].firstMatch.tap()
-        nap(3)
-        checkpoint("03-keyboard")
+        nap(4)
+        shot("03-keyboard")
+
+        // Type a command so the shell isn't empty in the shot.
+        app.typeText("uname -a\n")
+        nap(4)
+        shot("04-terminal-live")
 
         // SFTP file browser through the workspace menu.
+        for key in ["hide keyboard", "Hide keyboard", "keyboard.chevron.compact.down"] {
+            let b = app.keyboards.buttons[key].firstMatch
+            if b.exists { b.tap(); break }
+        }
+        nap(1)
         tapAny(["workspaceMenu", "ellipsis.circle", "More"])
         nap(1)
         tapAny(["Files"])
-        nap(10)
-        checkpoint("04-files")
+        nap(12)
+        shot("05-files")
 
         // Dismiss the sheet, close the session, land on hosts.
         app.descendants(matching: .any)["filesBrowser"].firstMatch.swipeDown()
@@ -59,56 +72,47 @@ final class Shots: XCTestCase {
         nap(1)
         tapAny(["Close"])
         nap(2)
-        checkpoint("05-hosts")
+        shot("06-hosts")
 
         tapAny(["settingsButton", "gearshape"])
         nap(2)
-        checkpoint("06-settings")
+        shot("07-settings")
 
         app.descendants(matching: .any)["Theme"].firstMatch.tap()
         nap(2)
-        checkpoint("07-theme-picker")
+        shot("08-theme-picker")
 
-        // Light mode: workflow flips simulator appearance.
+        // Light mode: workflow flips simulator appearance on the marker.
         announce("APPEAR:light")
-        waitPaste("DONE:light")
-        nap(2)
-        app.navigationBars.buttons.element(boundBy: 0).tap() // back
+        nap(6)
+        app.navigationBars.buttons.element(boundBy: 0).tap() // back to settings
         nap(1)
-        app.swipeDown() // close settings sheet
+        app.swipeDown() // close the sheet
         nap(2)
-        checkpoint("08-hosts-light")
+        shot("09-hosts-light")
 
-        // Onboarding once more, now in light — argument-domain default
-        // overrides the stored flag without wiping data.
+        // Onboarding once more, now in light — the argument-domain
+        // default overrides the stored flag without wiping data.
         app.terminate()
         let light = XCUIApplication(bundleIdentifier: "com.terminal.app")
         light.launchArguments = ["-onboarding.done", "NO"]
         light.launch()
         nap(4)
-        checkpoint("09-onboarding-light")
+        shot("10-onboarding-light")
     }
 
     // MARK: - Sync
 
-    private func checkpoint(_ name: String) {
+    /// Mark a screenshot point, then hold the state for the workflow's
+    /// log-tail + `simctl io` latency.
+    private func shot(_ name: String) {
         announce("SHOT:\(name)")
-        waitPaste("DONE:\(name)")
-        nap(3) // let the pasteboard toast slide away
+        nap(10)
     }
 
     private func announce(_ marker: String) {
         FileHandle.standardError.write(Data((marker + "\n").utf8))
         NSLog("%@", marker)
-    }
-
-    private func waitPaste(_ token: String, timeout: TimeInterval = 120) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if UIPasteboard.general.string == token { return }
-            usleep(200_000)
-        }
-        NSLog("WAIT-TIMEOUT %@", token)
     }
 
     // MARK: - Helpers

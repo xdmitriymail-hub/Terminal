@@ -66,6 +66,18 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/Terminal.app
 
+      - name: Enable local SSH server
+        run: |
+          sudo systemsetup -setremotelogin on 2>/dev/null \
+            || sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null \
+            || sudo launchctl bootstrap system/ /System/Library/LaunchDaemons/ssh.plist
+          sudo dscl . -passwd /Users/runner 'Term1n4lSh0ts' 2>/dev/null \
+            || printf 'Term1n4lSh0ts\nTerm1n4lSh0ts\n' | sudo dscl . -passwd /Users/runner
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            nc -z 127.0.0.1 22 && break || sleep 2
+          done
+          nc -z 127.0.0.1 22 && echo "sshd up"
+
       - name: Drive UI + capture screenshots
         run: |
           mkdir -p shots
@@ -85,13 +97,11 @@ jobs:
                   if [ -n "$name" ]; then
                     sleep 2
                     xcrun simctl io "$UDID" screenshot "shots/$name.png"
-                    echo "DONE:$name" | xcrun simctl pbcopy "$UDID"
                     echo "captured $name"
                   fi
                   ;;
                 *APPEAR:light*)
                   xcrun simctl ui "$UDID" appearance light
-                  echo "DONE:light" | xcrun simctl pbcopy "$UDID"
                   echo "appearance -> light"
                   ;;
               esac
