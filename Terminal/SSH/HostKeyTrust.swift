@@ -14,7 +14,7 @@ enum HostKeyEvent: Equatable, Sendable {
 /// TOFU (trust-on-first-use) host key validator. Known keys are verified
 /// against the store; unknown or changed keys are delegated to an async
 /// decider (UI alert) without blocking the event loop.
-final class HostKeyTrustValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
+final class HostKeyTrustValidator: NIOSSHClientServerAuthenticationDelegate, Sendable {
     private let host: String
     private let port: Int
     private let knownKey: String?

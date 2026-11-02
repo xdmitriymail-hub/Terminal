@@ -1,23 +1,25 @@
 import SwiftUI
 
 /// Full-screen terminal for one session. Pure surface + status dot +
-/// a quiet glass strip for connecting/reconnecting/failure — never a
-/// wall of text.
+/// a quiet glass capsule for connecting/reconnecting/failure — never
+/// a wall of text.
 struct TerminalScreenView: View {
     @ObservedObject var session: TerminalSession
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var snippets: SnippetsStore
     @EnvironmentObject var engine: SessionEngine
     @Environment(\.colorScheme) private var colorScheme
+    var isActive = true
     private let bar: KeyboardAccessoryView?
     private let externalAccessory: UIView?
 
-    init(session: TerminalSession, accessory: UIView? = nil) {
+    init(session: TerminalSession, accessory: UIView? = nil, isActive: Bool = true) {
         self.session = session
         self.externalAccessory = accessory
+        self.isActive = isActive
         if accessory == nil {
             let bar = KeyboardAccessoryView()
-            bar.modifiers = session.modifiers
+            bar.bind(modifiers: session.modifiers)
             bar.onSend = { [weak session] bytes in
                 session?.send(ArraySlice(bytes))
             }
@@ -39,29 +41,31 @@ struct TerminalScreenView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            TerminalSurface(
-                session: session,
-                fontSize: settings.settings.fontSize,
-                theme: activeTheme,
-                accessory: accessory,
-                modifiers: session.modifiers
-            )
-            .ignoresSafeArea(.container, edges: .bottom)
-            .accessibilityIdentifier("terminalSurface")
-
-            if !snippets.snippets.isEmpty {
-                SnippetBar(session: session)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+        TerminalSurface(
+            session: session,
+            fontSize: settings.settings.fontSize,
+            theme: activeTheme,
+            accessory: accessory,
+            modifiers: session.modifiers,
+            isActive: isActive
+        )
+        .accessibilityIdentifier("terminalSurface")
+        .accessibilityHidden(!isActive)
+        // Chrome insets reserve space — the surface itself never draws
+        // under the tab bar, and the theme color still reaches the
+        // screen edges so no dark corners show around the keyboard.
+        .background(activeTheme.background.ignoresSafeArea(.container))
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 8) {
+                if !snippets.snippets.isEmpty {
+                    SnippetBar(session: session)
+                }
+                if showsStatus {
+                    statusBadge
+                }
             }
-
-            if showsStatus {
-                statusStrip
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
+            .animation(.spring(duration: 0.3), value: session.state)
         }
-        .animation(.spring(duration: 0.3), value: session.state)
-        .background(activeTheme.background)
         .onChange(of: session.state) { _, new in
             if new == .online { Haptics.connected() }
         }
@@ -84,37 +88,41 @@ struct TerminalScreenView: View {
         }
     }
 
+    // MARK: - Status badge
+
+    /// Floating capsule: spinner + one word + quiet actions.
     @ViewBuilder
-    private var statusStrip: some View {
+    private var statusBadge: some View {
         switch session.state {
         case .connecting:
-            strip {
+            badge {
                 ProgressView()
                     .controlSize(.small)
-                stripButton("xmark") {
+                Text("Connecting")
+                badgeButton("xmark", label: "Cancel") {
                     Haptics.tap()
                     engine.closeSession(session)
                 }
             }
         case .reconnecting:
-            strip {
+            badge {
                 ProgressView()
                     .controlSize(.small)
+                Text("Reconnecting")
             }
         case .failed(let message):
-            strip {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            badge {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
                 Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
-                stripButton("arrow.clockwise") {
+                    .frame(maxWidth: 220)
+                badgeButton("arrow.clockwise", label: "Retry") {
                     Haptics.tap()
                     session.reconnect()
                 }
-                stripButton("xmark") {
+                badgeButton("xmark", label: "Close") {
                     Haptics.tap()
                     engine.closeSession(session)
                 }
@@ -124,23 +132,31 @@ struct TerminalScreenView: View {
         }
     }
 
-    private func strip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        HStack(spacing: 12) { content() }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .terminalGlass(cornerRadius: 16)
-            .padding(.top, 6)
+    private func badge<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 10) { content() }
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .padding(.vertical, 8)
+            .terminalGlass(cornerRadius: 19)
+            .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .padding(.top, 2)
     }
 
-    private func stripButton(_ glyph: String, action: @escaping () -> Void) -> some View {
+    private func badgeButton(_ glyph: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: glyph)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.secondary)
-                .frame(width: 26, height: 26)
+                .frame(width: 28, height: 28)
                 .background(Color.primary.opacity(0.1), in: Circle())
+                // 28pt visual, ≥44pt hit — the capsule stays slim.
+                .contentShape(Circle().inset(by: -8))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
     }
 
 }

@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import Terminal
 
 /// AES-CTR NIST vector + real ssh-keygen fixtures (bcrypt KDF covered
@@ -167,5 +168,306 @@ final class CryptoAndKeyParserTests: XCTestCase {
         let reParsed = try OpenSSHKeyParser.parse(pem, passphrase: "export-pass")
         XCTAssertEqual(reParsed.privateMaterial, parsed.privateMaterial)
         XCTAssertEqual(reParsed.publicKeyLine, parsed.publicKeyLine)
+    }
+
+    // MARK: - Crafted-key builders
+
+    private func blobData(_ pem: String) -> Data {
+        Data(base64Encoded: pem
+            .replacingOccurrences(of: "-----BEGIN OPENSSH PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "-----END OPENSSH PRIVATE KEY-----", with: "")
+            .replacingOccurrences(of: "\\s", with: "", options: .regularExpression))!
+    }
+
+    private func reencode(_ blob: Data) -> String {
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            + blob.base64EncodedString(options: .lineLength64Characters)
+            + "\n-----END OPENSSH PRIVATE KEY-----"
+    }
+
+    /// Builds an unencrypted openssh-key-v1 ed25519 PEM with every
+    /// public-key position caller-controlled — each substitution is
+    /// tested independently.
+    private func craftedEd25519PEM(
+        seed: Data,
+        embedded: Data,
+        outer: Data,
+        tail: Data,
+        commentBytes: Data? = nil,
+        padLength: Int? = nil,
+        blobSuffix: Data = Data(),
+        outerSuffix: Data = Data()
+    ) -> String {
+        var pub = SSHWireWriter()
+        pub.writeText("ssh-ed25519")
+        pub.writeString(outer)
+        var pubData = pub.data
+        pubData.append(blobSuffix)
+
+        var inner = SSHWireWriter()
+        inner.writeUInt32(0xDEADBEEF)
+        inner.writeUInt32(0xDEADBEEF)
+        inner.writeText("ssh-ed25519")
+        inner.writeString(embedded)
+        inner.writeString(seed + tail)
+        if let commentBytes {
+            inner.writeString(commentBytes)
+        } else {
+            // The comment doubles as alignment filler so a custom
+            // padLength stays block-aligned.
+            let filler = (8 - ((inner.data.count + 4) % 8)) % 8
+            inner.writeText(String(repeating: "c", count: filler))
+        }
+        var section = inner.data
+        let pad = padLength ?? (8 - (section.count % 8))
+        for i in 0..<pad { section.append(UInt8(i + 1)) }
+
+        var w = SSHWireWriter()
+        w.writeText("none")
+        w.writeText("none")
+        w.writeString(Data())
+        w.writeUInt32(1)
+        w.writeString(pubData)
+        w.writeString(section)
+        var outerData = Data("openssh-key-v1\0".utf8)
+        outerData.append(w.data)
+        outerData.append(outerSuffix)
+        return reencode(outerData)
+    }
+
+    /// Builds an unencrypted openssh-key-v1 ECDSA PEM — the private
+    /// section's `curve` and the declared `typeName` can disagree.
+    private func craftedECDSAPEM(typeName: String, curve: String) -> String {
+        var pub = SSHWireWriter()
+        pub.writeText(typeName)
+        pub.writeText(curve)
+        pub.writeString(Data(repeating: 4, count: 65))
+
+        var inner = SSHWireWriter()
+        inner.writeUInt32(7)
+        inner.writeUInt32(7)
+        inner.writeText(typeName)
+        inner.writeText(curve)
+        inner.writeString(Data(repeating: 4, count: 65))
+        inner.writeString(Data(repeating: 1, count: 32))
+        inner.writeText("t")
+        var section = inner.data
+        let pad = 8 - (section.count % 8)
+        for i in 0..<pad { section.append(UInt8(i + 1)) }
+
+        var w = SSHWireWriter()
+        w.writeText("none")
+        w.writeText("none")
+        w.writeString(Data())
+        w.writeUInt32(1)
+        w.writeString(pub.data)
+        w.writeString(section)
+        var outerData = Data("openssh-key-v1\0".utf8)
+        outerData.append(w.data)
+        return reencode(outerData)
+    }
+
+    // MARK: - ed25519 pair-check substitutions (#19)
+
+    /// Control: a self-consistent crafted key still parses.
+    func testEd25519CraftedControlParses() throws {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pub = a.publicKey.rawRepresentation
+        let pem = craftedEd25519PEM(seed: a.rawRepresentation, embedded: pub, outer: pub, tail: pub)
+        let parsed = try OpenSSHKeyParser.parse(pem, passphrase: nil)
+        XCTAssertEqual(parsed.type, .ed25519)
+        XCTAssertEqual(parsed.privateMaterial, a.rawRepresentation)
+    }
+
+    /// embedded = B while outer/tail/seed are A — substitution in the
+    /// private section's embedded public.
+    func testEd25519EmbeddedSubstitutionRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let b = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation,
+            embedded: b.publicKey.rawRepresentation,
+            outer: a.publicKey.rawRepresentation,
+            tail: a.publicKey.rawRepresentation
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    /// outer = B while embedded/tail/seed are A — substitution in the
+    /// outer public blob.
+    func testEd25519OuterSubstitutionRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let b = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation,
+            embedded: a.publicKey.rawRepresentation,
+            outer: b.publicKey.rawRepresentation,
+            tail: a.publicKey.rawRepresentation
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    /// tail = B while embedded/outer/seed are A — substitution in the
+    /// private blob's trailing public half.
+    func testEd25519TailSubstitutionRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let b = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation,
+            embedded: a.publicKey.rawRepresentation,
+            outer: a.publicKey.rawRepresentation,
+            tail: b.publicKey.rawRepresentation
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    /// THE gap: every public-key position consistently claims B while
+    /// the seed is A — embedded==outer used to pass, and tail==derived
+    /// only compared tail to the (mismatched) seed, so this chimera
+    /// imported. Now embeddedPub==derivedPub catches it.
+    func testEd25519SeedAPublicBChimeraRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let b = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pubB = b.publicKey.rawRepresentation
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation,
+            embedded: pubB,
+            outer: pubB,
+            tail: pubB
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    // MARK: - Strict openssh-key-v1 validation (#20)
+
+    func testTrailingOuterBytesRejected() {
+        var blob = blobData(ed25519PEM)
+        blob.append(0x00)
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(reencode(blob), passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    func testTrailingPublicBlobBytesRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pub = a.publicKey.rawRepresentation
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation, embedded: pub, outer: pub, tail: pub,
+            blobSuffix: Data([0xAA])
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    func testEmptyPaddingRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pub = a.publicKey.rawRepresentation
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation, embedded: pub, outer: pub, tail: pub,
+            padLength: 0
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    func testOverlongPaddingRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pub = a.publicKey.rawRepresentation
+        // 16 correctly-incrementing pad bytes under cipher "none"
+        // (block size 8): valid bytes, invalid length.
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation, embedded: pub, outer: pub, tail: pub,
+            padLength: 16
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    func testCorruptPaddingByteRejected() {
+        var blob = blobData(ed25519PEM)
+        // The private section is the last field — its last byte is a
+        // padding byte. Flip it.
+        blob[blob.count - 1] ^= 0xFF
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(reencode(blob), passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    func testKeyTypeCurveMismatchRejected() {
+        // Type says nistp256, embedded curve field says nistp384.
+        let pem = craftedECDSAPEM(typeName: "ecdsa-sha2-nistp256", curve: "nistp384")
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    func testNonUTF8CommentRejected() {
+        let a = CryptoKit.Curve25519.Signing.PrivateKey()
+        let pub = a.publicKey.rawRepresentation
+        let pem = craftedEd25519PEM(
+            seed: a.rawRepresentation, embedded: pub, outer: pub, tail: pub,
+            commentBytes: Data([0xFF, 0xFE])
+        )
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .corrupt)
+        }
+    }
+
+    func testOversizedPEMRejectedBeforeDecode() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            + String(repeating: "A", count: 129 * 1024)
+            + "\n-----END OPENSSH PRIVATE KEY-----"
+        XCTAssertThrowsError(try OpenSSHKeyParser.parse(pem, passphrase: nil)) {
+            XCTAssertEqual($0 as? SSHKeyImportError, .invalidFormat)
+        }
+    }
+
+    // MARK: - Cancellable bcrypt KDF (#18/#20)
+
+    func testBCryptKDFIsCancellable() {
+        XCTAssertThrowsError(try BCryptPBKDF.pbkdf(
+            password: Data("p".utf8), salt: Data("s".utf8),
+            keyLength: 48, rounds: 16, isCancelled: { true })
+        ) {
+            XCTAssertTrue($0 is CancellationError)
+        }
+        // An un-cancelled derivation still produces bytes.
+        XCTAssertEqual(
+            BCryptPBKDF.pbkdf(password: Data("p".utf8), salt: Data("s".utf8), keyLength: 48, rounds: 1).count,
+            48
+        )
+    }
+
+    // MARK: - Keychain OSStatus paths (#6)
+
+    /// Exercises the real SecItem statuses on the simulator keychain:
+    /// absent → errSecItemNotFound, saved → errSecSuccess, and delete
+    /// reports its own status instead of void.
+    func testKeychainLoadStatusAndDeleteStatus() {
+        let tag = "test.\(UUID().uuidString)"
+        var result = Keychain.loadWithStatus(tag: tag)
+        XCTAssertNil(result.data)
+        XCTAssertEqual(result.status, errSecItemNotFound)
+
+        XCTAssertEqual(Keychain.save(Data("s".utf8), tag: tag), errSecSuccess)
+        defer { Keychain.delete(tag) }
+
+        result = Keychain.loadWithStatus(tag: tag)
+        XCTAssertEqual(result.status, errSecSuccess)
+        XCTAssertEqual(result.data, Data("s".utf8))
+
+        XCTAssertEqual(Keychain.delete(tag), errSecSuccess)
+        XCTAssertEqual(Keychain.loadWithStatus(tag: tag).status, errSecItemNotFound)
     }
 }

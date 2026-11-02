@@ -13,6 +13,8 @@ struct OnboardingView: View {
     @State private var username = ""
     @State private var password = ""
     @State private var saveFailed = false
+    @State private var saveStatus: OSStatus = 0
+    @State private var profileSaveFailed = false
     @FocusState private var focus: Field?
 
     private enum Field { case host, port, username, password }
@@ -71,9 +73,12 @@ struct OnboardingView: View {
             .toolbar(.hidden, for: .navigationBar)
             .onTapGesture { focus = nil }
             .alert(
-                "Couldn't store the password — you'll be asked for it when connecting",
+                "Couldn't store the password (\(saveStatus)) — you'll be asked for it when connecting",
                 isPresented: $saveFailed
             ) {
+                Button("OK") {}
+            }
+            .alert("Couldn't save the server — it won't be there next launch", isPresented: $profileSaveFailed) {
                 Button("OK") {}
             }
         }
@@ -125,15 +130,13 @@ struct OnboardingView: View {
                   placeholder: "server.example.com",
                   submit: { focus = .username })
             Divider().padding(.leading, 16)
-            HStack(spacing: 12) {
-                field("Username", text: $username, focused: .username,
-                      placeholder: "root",
-                      submit: { focus = .password })
-                field("Port", text: $port, focused: .port,
-                      placeholder: "22", numeric: true,
-                      submit: { focus = .password })
-                    .frame(maxWidth: 92)
-            }
+            field("Username", text: $username, focused: .username,
+                  placeholder: "root",
+                  submit: { focus = .port })
+            Divider().padding(.leading, 16)
+            field("Port", text: $port, focused: .port,
+                  placeholder: "22", numeric: true,
+                  submit: { focus = .password })
             Divider().padding(.leading, 16)
             field("Password", text: $password, focused: .password,
                   placeholder: "Optional", secure: true,
@@ -250,11 +253,14 @@ struct OnboardingView: View {
             Haptics.failed()
             return
         }
-        if !password.isEmpty,
-           Keychain.save(password, tag: "password.\(profile.id.uuidString)") != errSecSuccess {
-            // The connect below will ask for the password instead —
-            // but the user should know why.
-            saveFailed = true
+        if !password.isEmpty {
+            let status = Keychain.save(password, tag: "password.\(profile.id.uuidString)")
+            if status != errSecSuccess {
+                // The connect below will ask for the password instead —
+                // but the user should know why.
+                saveStatus = status
+                saveFailed = true
+            }
         }
         connect(profile)
     }
@@ -262,7 +268,10 @@ struct OnboardingView: View {
     private func connect(_ profile: ServerProfile) {
         Haptics.tap()
         done = true
-        profiles.save(profile)
+        if !profiles.save(profile) {
+            Haptics.failed()
+            profileSaveFailed = true
+        }
         engine.openSession(for: profile, cols: 80, rows: 24)
     }
 }
@@ -270,6 +279,7 @@ struct OnboardingView: View {
 /// A block cursor that blinks, like the real thing.
 private struct BlinkingCursor: View {
     @State private var visible = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         RoundedRectangle(cornerRadius: 2, style: .continuous)
@@ -277,6 +287,7 @@ private struct BlinkingCursor: View {
             .frame(width: 17, height: 30)
             .opacity(visible ? 1 : 0)
             .onAppear {
+                guard !reduceMotion else { return }
                 withAnimation(.easeInOut(duration: 0.53).repeatForever(autoreverses: true)) {
                     visible = false
                 }

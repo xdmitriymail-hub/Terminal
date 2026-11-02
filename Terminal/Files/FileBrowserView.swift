@@ -162,6 +162,7 @@ private struct FileBrowserContent: View {
             .terminalGlass(cornerRadius: 11)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(crumb.path == "/" ? String(localized: "Root") : crumb.name)
         .id(crumb.id)
     }
 
@@ -174,7 +175,12 @@ private struct FileBrowserContent: View {
         } else if let message = vm.error, vm.files.isEmpty {
             errorView(message)
         } else if vm.visibleFiles.isEmpty {
-            EmptyState(symbol: vm.searchText.isEmpty ? "folder" : "magnifyingglass", text: nil)
+            EmptyState(
+                symbol: vm.searchText.isEmpty ? "folder" : "magnifyingglass",
+                text: vm.searchText.isEmpty
+                    ? String(localized: "Empty folder")
+                    : String(localized: "No matches")
+            )
         } else {
             fileList
         }
@@ -236,6 +242,7 @@ private struct FileBrowserContent: View {
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
         }
         .padding(.vertical, 2)
@@ -261,6 +268,7 @@ private struct FileBrowserContent: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private func errorView(_ message: String) -> some View {
@@ -293,6 +301,7 @@ private struct FileBrowserContent: View {
                 Image(systemName: "chevron.left")
             }
             .disabled(!vm.canGoUp)
+            .accessibilityLabel("Back")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button {
@@ -311,6 +320,10 @@ private struct FileBrowserContent: View {
                         }
                     }
             }
+            .accessibilityLabel("Transfers")
+            .accessibilityValue(
+                transfers.activeCount > 0 ? Text("\(transfers.activeCount)") : Text("")
+            )
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
@@ -334,6 +347,7 @@ private struct FileBrowserContent: View {
             } label: {
                 Image(systemName: "plus")
             }
+            .accessibilityLabel("Add")
         }
     }
 
@@ -364,7 +378,7 @@ private struct FileBrowserContent: View {
         Haptics.tap()
         Task {
             guard let svc = try? await vm.service() else {
-                vm.error = "Couldn't download"
+                vm.error = String(localized: "Couldn't download")
                 Haptics.failed()
                 return
             }
@@ -376,13 +390,21 @@ private struct FileBrowserContent: View {
         guard case .success(let url) = result else { return }
         Task {
             guard let svc = try? await vm.service() else {
-                vm.error = "Couldn't upload"
+                vm.error = String(localized: "Couldn't upload")
                 Haptics.failed()
                 return
             }
             let remote = vm.remotePath(for: url.lastPathComponent)
-            if await svc.exists(path: remote) {
-                overwritePrompt = PendingUpload(local: url, remotePath: remote, svc: svc)
+            do {
+                if try await svc.exists(atPath: remote) {
+                    overwritePrompt = PendingUpload(local: url, remotePath: remote, svc: svc)
+                    return
+                }
+            } catch {
+                // "Does it exist?" failed for a real reason (permission,
+                // network) — don't silently treat that as a clear path.
+                vm.error = String(localized: "Couldn't check the server")
+                Haptics.failed()
                 return
             }
             await startUpload(local: url, remotePath: remote, svc: svc)
@@ -395,29 +417,38 @@ private struct FileBrowserContent: View {
         Task {
             var remote = pending.remotePath
             if !replace {
-                remote = await uniqueRemotePath(pending.remotePath, svc: pending.svc)
+                guard let unique = await uniqueRemotePath(pending.remotePath, svc: pending.svc) else { return }
+                remote = unique
             }
-            await startUpload(local: pending.local, remotePath: remote, svc: pending.svc)
+            await startUpload(local: pending.local, remotePath: remote, svc: pending.svc, overwrite: replace)
         }
     }
 
     /// "name.txt" → "name 2.txt", "name 3.txt"… checked on the server.
-    private func uniqueRemotePath(_ path: String, svc: SFTPService) async -> String {
+    /// Returns nil when stat keeps failing or no name frees up in time.
+    private func uniqueRemotePath(_ path: String, svc: SFTPService) async -> String? {
         let dir = (path as NSString).deletingLastPathComponent
         let ext = (path as NSString).pathExtension
         let base = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        var n = 2
         var candidate = path
-        while await svc.exists(path: candidate) {
+        for n in 2...100 {
+            do {
+                if try await !svc.exists(atPath: candidate) { return candidate }
+            } catch {
+                vm.error = String(localized: "Couldn't check the server")
+                Haptics.failed()
+                return nil
+            }
             let name = ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"
             candidate = (dir as NSString).appendingPathComponent(name)
-            n += 1
         }
-        return candidate
+        return nil
     }
 
-    private func startUpload(local: URL, remotePath: String, svc: SFTPService) async {
-        TransferManager.shared.upload(local: local, to: remotePath, via: svc)
+    private func startUpload(local: URL, remotePath: String, svc: SFTPService, overwrite: Bool = true) async {
+        TransferManager.shared.upload(local: local, to: remotePath, via: svc, overwrite: overwrite) { [vm] in
+            await vm.reload()
+        }
         // Let the picker finish dismissing before showing the queue.
         try? await Task.sleep(for: .milliseconds(300))
         showTransfers = true
@@ -589,7 +620,7 @@ private struct PermissionsSheet: View {
                 }
             }
         }
-        .presentationDetents([.height(330)])
+        .presentationDetents([.medium])
     }
 
     private func toggle(_ title: String, symbol: String, isOn: Binding<Bool>) -> some View {

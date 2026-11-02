@@ -6,20 +6,34 @@ struct SnippetsListView: View {
     @EnvironmentObject private var snippets: SnippetsStore
     @State private var adding = false
     @State private var editing: Snippet?
+    @State private var saveFailed = false
 
     var body: some View {
         Group {
             if snippets.snippets.isEmpty {
-                EmptyState(symbol: "chevron.left.forwardslash.chevron.right")
+                VStack {
+                    EmptyState(
+                        symbol: "chevron.left.forwardslash.chevron.right",
+                        text: String(localized: "No snippets")
+                    )
+                    Button("Add") {
+                        Haptics.tap()
+                        adding = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.terminalAccent)
+                    .padding(.bottom, 24)
+                }
             } else {
                 List {
                     ForEach(snippets.snippets) { snippet in
-                        row(snippet)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                Haptics.select()
-                                editing = snippet
-                            }
+                        Button {
+                            Haptics.select()
+                            editing = snippet
+                        } label: {
+                            row(snippet)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .onDelete(perform: delete)
                     .onMove(perform: move)
@@ -42,6 +56,7 @@ struct SnippetsListView: View {
                     } label: {
                         Image(systemName: "plus")
                     }
+                    .accessibilityLabel("Add snippet")
                 }
             }
         }
@@ -50,6 +65,9 @@ struct SnippetsListView: View {
         }
         .sheet(item: $editing) { snippet in
             AddSnippetView(snippet: snippet)
+        }
+        .alert("Couldn't save", isPresented: $saveFailed) {
+            Button("OK") {}
         }
     }
 
@@ -75,13 +93,22 @@ struct SnippetsListView: View {
 
     private func delete(_ offsets: IndexSet) {
         let doomed = offsets.compactMap { snippets.snippets[safe: $0] }
-        for snippet in doomed { snippets.delete(snippet) }
+        var failed = false
+        for snippet in doomed where !snippets.delete(snippet) { failed = true }
+        if failed {
+            saveFailed = true
+            Haptics.failed()
+        }
     }
 
     private func move(_ offsets: IndexSet, to destination: Int) {
         var order = snippets.snippets
         order.move(fromOffsets: offsets, toOffset: destination)
-        snippets.replaceAll(order)
+        guard snippets.replaceAll(order) else {
+            saveFailed = true
+            Haptics.failed()
+            return
+        }
         Haptics.select()
     }
 }

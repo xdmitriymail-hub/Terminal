@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import ImageIO
+import Citadel
 
 /// In-place file preview: text opens in the code editor, images get
 /// pinch-to-zoom, anything else offers the system share sheet.
@@ -18,10 +19,24 @@ struct FilePreviewView: View {
     @State private var data: Data?
     @State private var shareItem: ShareItem?
     @State private var preparingShare = false
+    @State private var shareProgress: Double?
+    @State private var shareTask: Task<Void, Never>?
     @State private var saving = false
     @State private var saveFailed = false
     @State private var shareFailed = false
     @State private var confirmDiscard = false
+    @State private var confirmOverwrite = false
+    /// Post-save remote attributes — the conflict baseline must move
+    /// forward after every successful save or the next save would
+    /// false-positive on our own write.
+    @State private var postSaveSize: UInt64?
+    @State private var postSaveMTime: Date?
+    /// Bumped on every load() so a stale decode/read result can never
+    /// overwrite a newer attempt.
+    @State private var loadGeneration = 0
+    /// Single in-flight ImageIO decode — cancelled before a retry can
+    /// start a second one for the same file.
+    @State private var decodeTask: Task<UIImage?, Never>?
 
     private enum Phase { case loading, ready, failed }
     private enum Content { case text, image, binary }
@@ -38,6 +53,11 @@ struct FilePreviewView: View {
         let id = UUID()
         let url: URL
     }
+
+    /// Remote state captured when the file was listed — the baseline
+    /// external-modification checks compare against.
+    private var snapshotSize: UInt64? { postSaveSize ?? file.size }
+    private var snapshotMTime: Date? { postSaveMTime ?? file.modified }
 
     var body: some View {
         NavigationStack {
@@ -65,6 +85,16 @@ struct FilePreviewView: View {
                 Button("Discard", role: .destructive) { dismiss() }
                 Button("Keep Editing", role: .cancel) {}
             }
+            .confirmationDialog(
+                "“\(file.name)” changed on the server",
+                isPresented: $confirmOverwrite,
+                titleVisibility: .visible
+            ) {
+                Button("Overwrite", role: .destructive) {
+                    Task { await save(force: true) }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
             .alert("Couldn't save", isPresented: $saveFailed) {
                 Button("OK") {}
             }
@@ -81,6 +111,12 @@ struct FilePreviewView: View {
             }
         }
         .task { await load() }
+        .onDisappear {
+            // Dropping the view abandons both the share download and
+            // any pending decode work.
+            shareTask?.cancel()
+            decodeTask?.cancel()
+        }
     }
 
     // MARK: - Content
@@ -105,10 +141,19 @@ struct FilePreviewView: View {
                 .font(.system(size: 60, weight: .light))
                 .foregroundStyle(.secondary)
             if preparingShare {
-                ProgressView()
+                Group {
+                    if let shareProgress {
+                        ProgressView(value: shareProgress)
+                    } else {
+                        ProgressView()
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    shareTask?.cancel()
+                }
             } else {
                 Button {
-                    Task { await share() }
+                    shareTask = Task { await share() }
                 } label: {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
@@ -151,7 +196,7 @@ struct FilePreviewView: View {
                         .controlSize(.small)
                 } else {
                     Button("Save") {
-                        Task { await save() }
+                        Task { await save(force: false) }
                     }
                     .disabled(!isDirty)
                 }
@@ -174,15 +219,22 @@ struct FilePreviewView: View {
     // MARK: - Loading
 
     private func load() async {
+        loadGeneration += 1
+        let gen = loadGeneration
+        // A retry must never run two decodes at once for the same file.
+        decodeTask?.cancel()
+        decodeTask = nil
         phase = .loading
         do {
             if let size = file.size, size > UInt64(byteCap) {
+                guard gen == loadGeneration else { return }
                 content = .binary
                 phase = .ready
                 return
             }
             let svc = try await vm.service()
             let (raw, complete) = try await svc.readFile(path: file.path, maxBytes: byteCap)
+            guard gen == loadGeneration else { return }
             // Never edit or share a possibly truncated file — saving
             // would silently cut it on the server, sharing would ship
             // a broken copy. `data` stays nil so share() downloads it
@@ -196,29 +248,71 @@ struct FilePreviewView: View {
                 text = decoded
                 savedText = decoded
                 content = .text
-            } else if let decoded = Self.downsampled(raw) {
-                image = decoded
-                content = .image
             } else {
-                data = raw
-                content = .binary
+                // ImageIO decode is heavy CPU work — never on the UI
+                // thread. Only the result hops back to the view, and
+                // only if this load is still the current one.
+                let decode = Task.detached(priority: .userInitiated) {
+                    Self.downsampled(raw)
+                }
+                decodeTask = decode
+                let decoded = await decode.value
+                guard gen == loadGeneration else { return }
+                if let decoded {
+                    image = decoded
+                    content = .image
+                } else {
+                    data = raw
+                    content = .binary
+                }
             }
             phase = .ready
         } catch {
+            guard gen == loadGeneration else { return }
             phase = .failed
             Haptics.failed()
         }
     }
 
-    private func save() async {
+    // MARK: - Saving
+
+    /// Re-stat the remote file and compare with the listing snapshot:
+    /// a size or mtime change means someone else touched it since we
+    /// loaded. Unverifiable stat results count as "changed" — prompting
+    /// is always cheaper than a blind overwrite.
+    private func isExternallyModified(using svc: SFTPService) async -> Bool {
+        let attrs: SFTPFileAttributes
+        do {
+            attrs = try await svc.stat(path: file.path)
+        } catch {
+            return true
+        }
+        if attrs.size != snapshotSize { return true }
+        let remoteMTime = attrs.accessModificationTime?.modificationTime
+        if remoteMTime != snapshotMTime { return true }
+        return false
+    }
+
+    private func save(force: Bool) async {
         guard isDirty, !saving else { return }
         saving = true
         // Snapshot first — edits during the await must stay dirty.
         let snapshot = text
         do {
             let svc = try await vm.service()
+            if !force, await isExternallyModified(using: svc) {
+                saving = false
+                confirmOverwrite = true
+                return
+            }
             try await svc.writeFile(path: file.path, data: Data(snapshot.utf8))
             savedText = snapshot
+            // Re-stat so the next save compares against the file we
+            // just wrote, not the stale listing entry.
+            if let after = try? await svc.stat(path: file.path) {
+                postSaveSize = after.size
+                postSaveMTime = after.accessModificationTime?.modificationTime
+            }
             Haptics.tap()
         } catch {
             saveFailed = true
@@ -227,36 +321,72 @@ struct FilePreviewView: View {
         saving = false
     }
 
-    /// Share needs a real file URL — use what we already read, or fetch
-    /// it on demand when the file was too big to keep in memory.
+    // MARK: - Sharing
+
+    /// Share needs a real file URL — stream it into a private temp
+    /// folder (bounded buffer, never a whole-file Data for big files)
+    /// and let the sheet's dismissal + a launch-time sweep handle
+    /// cleanup. Cancel removes the half-written copy.
     private func share() async {
         guard !preparingShare else { return }
         preparingShare = true
+        shareProgress = nil
+        defer {
+            preparingShare = false
+            shareProgress = nil
+        }
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preview-\(UUID().uuidString)", isDirectory: true)
         do {
-            let folder = FileManager.default.temporaryDirectory
-                .appendingPathComponent("preview-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            // Server-controlled name — flatten any path components.
-            var safe = (file.name as NSString).lastPathComponent.replacingOccurrences(of: "..", with: "_")
-            if safe.isEmpty { safe = "file" }
-            let target = folder.appendingPathComponent(safe)
+            // Server-controlled name — same flattening rules the
+            // transfer queue applies.
+            let target = folder.appendingPathComponent(TransferManager.sanitizedFileName(file.name))
             if let data {
+                // Already in memory (small binary file) — a plain write
+                // is cheaper than a second remote read.
                 try data.write(to: target, options: .atomic)
             } else {
+                try Self.requireFreeSpace(for: file.size)
                 let svc = try await vm.service()
-                try await svc.download(path: file.path, to: target, totalSize: file.size, progress: nil)
+                try await svc.download(path: file.path, to: target, totalSize: file.size) { fraction in
+                    Task { @MainActor in
+                        self.shareProgress = fraction
+                    }
+                }
             }
+            try Task.checkCancellation()
             shareItem = ShareItem(url: target)
             Haptics.tap()
+        } catch is CancellationError {
+            // Partially streamed file — drop the whole private folder.
+            try? FileManager.default.removeItem(at: folder)
         } catch {
+            try? FileManager.default.removeItem(at: folder)
             shareFailed = true
             Haptics.failed()
         }
-        preparingShare = false
+    }
+
+    /// Fail fast when the device clearly can't hold the download —
+    /// better than discovering it mid-stream.
+    private static func requireFreeSpace(for needed: UInt64?) throws {
+        guard let needed else { return }
+        let values = try FileManager.default.temporaryDirectory
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        guard let free = values.volumeAvailableCapacityForImportantUsage, free >= 0 else { return }
+        if UInt64(free) < needed {
+            throw ShareFailure.insufficientSpace
+        }
+    }
+
+    private enum ShareFailure: Error {
+        case insufficientSpace
     }
 
     /// Decode huge rasters through ImageIO with a pixel cap so a 40 MP
-    /// photo can't blow the memory budget.
+    /// photo can't blow the memory budget. Runs on a detached worker —
+    /// never the UI thread.
     private static func downsampled(_ data: Data, maxPixel: CGFloat = 4096) -> UIImage? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
@@ -274,7 +404,8 @@ struct FilePreviewView: View {
         return UIImage(cgImage: cg)
     }
 
-    /// Left-over share folders from previous runs.
+    /// Left-over share folders from previous runs — called once at app
+    /// launch so killed mid-share sessions can't accumulate secrets.
     static func purgeShareTemps() {
         let tmp = FileManager.default.temporaryDirectory
         for item in (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []

@@ -5,19 +5,20 @@ import SwiftUI
 struct TransfersView: View {
     @ObservedObject private var manager = TransferManager.shared
     @Environment(\.dismiss) private var dismiss
+    @ScaledMetric private var iconSize: CGFloat = 34
 
     var body: some View {
         NavigationStack {
             Group {
                 if manager.transfers.isEmpty {
-                    EmptyState(symbol: "arrow.up.arrow.down", text: nil)
+                    EmptyState(symbol: "arrow.up.arrow.down", text: String(localized: "No transfers"))
                 } else {
                     List(manager.transfers) { transfer in
                         row(transfer)
                             .listRowBackground(Color.clear)
                             .listRowSeparatorTint(Color.primary.opacity(0.08))
                             .swipeActions(edge: .trailing) {
-                                if transfer.state == .running {
+                                if transfer.state.isActive {
                                     Button(role: .destructive) {
                                         manager.cancel(transfer.id)
                                     } label: {
@@ -48,7 +49,7 @@ struct TransfersView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if manager.transfers.contains(where: { $0.state != .running }) {
+                    if manager.transfers.contains(where: { !$0.state.isActive }) {
                         Button("Clear") {
                             manager.clearFinished()
                             Haptics.tap()
@@ -67,7 +68,7 @@ struct TransfersView: View {
             Image(systemName: transfer.isUpload ? "arrow.up" : "arrow.down")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(Color.terminalAccent)
-                .frame(width: 34, height: 34)
+                .frame(width: iconSize, height: iconSize)
                 .background(Color.terminalAccent.opacity(0.12), in: Circle())
 
             VStack(alignment: .leading, spacing: 5) {
@@ -75,6 +76,10 @@ struct TransfersView: View {
                     .font(.subheadline)
                     .lineLimit(1)
                 switch transfer.state {
+                case .queued:
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Color.terminalAccent)
                 case .running:
                     ProgressView(value: transfer.progress)
                         .tint(Color.terminalAccent)
@@ -95,19 +100,22 @@ struct TransfersView: View {
 
             Spacer(minLength: 8)
 
-            switch transfer.state {
-            case .done:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            case .failed:
-                Image(systemName: "exclamationmark.circle.fill")
-                    .foregroundStyle(.red.opacity(0.75))
-            case .cancelled:
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            case .running:
-                EmptyView()
+            Group {
+                switch transfer.state {
+                case .done:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                case .failed:
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red.opacity(0.75))
+                case .cancelled:
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                case .queued, .running:
+                    EmptyView()
+                }
             }
+            .accessibilityHidden(true)
         }
         .padding(.vertical, 3)
         .opacity(transfer.state == .done ? 0.55 : 1)

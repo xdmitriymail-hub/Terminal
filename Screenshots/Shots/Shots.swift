@@ -31,6 +31,17 @@ final class Shots: XCTestCase {
         nap(1)
         tapAny(["connectButton", "Connect"])
 
+        // If the stored credential didn't reach the keychain, the app
+        // asks again — fill the retry dialog so the flow continues.
+        let retryField = app.secureTextFields["localhost"].firstMatch
+        if retryField.waitForExistence(timeout: 6) {
+            retryField.tap()
+            nap(1)
+            retryField.typeText("Term1n4lSh0ts")
+            nap(1)
+            tapAny(["Connect"])
+        }
+
         // Host-key trust dialog.
         let trust = app.buttons["Trust"].firstMatch
         if trust.waitForExistence(timeout: 60) {

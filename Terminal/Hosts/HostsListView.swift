@@ -141,21 +141,25 @@ struct HostsListView: View {
             Button {
                 connect(profile)
             } label: {
-                Image(systemName: "play.fill")
+                Label("Connect", systemImage: "play.fill")
+                    .labelStyle(.iconOnly)
             }
             .tint(.terminalAccent)
+            .accessibilityLabel("Connect")
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
                 delete(profile)
             } label: {
-                Image(systemName: "trash")
+                Label("Delete", systemImage: "trash")
+                    .labelStyle(.iconOnly)
             }
             Button {
                 Haptics.tap()
                 editing = profile
             } label: {
-                Image(systemName: "pencil")
+                Label("Edit", systemImage: "pencil")
+                    .labelStyle(.iconOnly)
             }
             .tint(.terminalAccent)
         }
@@ -199,7 +203,11 @@ struct HostsListView: View {
             .forEach { engine.closeSession($0) }
         engine.invalidateConnection(for: profile.id)
         FileBrowserViewModel.evictWarm(profileID: profile.id)
-        profiles.delete(profile) // also drops the keychain password tag
+        // Also drops the keychain password tag — only after the store write lands.
+        if !profiles.delete(profile) {
+            Haptics.failed()
+            errorMessage = String(localized: "Couldn't delete the server")
+        }
     }
 
     private func duplicate(_ profile: ServerProfile) {
@@ -211,7 +219,11 @@ struct HostsListView: View {
            Keychain.save(password, tag: "password.\(copy.id.uuidString)") != errSecSuccess {
             errorMessage = "Couldn't copy the password — the new server will ask for it"
         }
-        profiles.save(copy)
+        if !profiles.save(copy) {
+            Haptics.failed()
+            errorMessage = String(localized: "Couldn't save the server")
+            return
+        }
         Haptics.tap()
     }
 

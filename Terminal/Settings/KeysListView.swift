@@ -7,20 +7,31 @@ struct KeysListView: View {
     @State private var showGenerator = false
     @State private var showImport = false
     @State private var selected: StoredSSHKey?
+    @State private var deleteFailed = false
 
     var body: some View {
         Group {
             if keys.keys.isEmpty {
-                EmptyState(symbol: "key")
+                VStack {
+                    EmptyState(symbol: "key", text: String(localized: "No keys"))
+                    Button("New Key") {
+                        Haptics.tap()
+                        showGenerator = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.terminalAccent)
+                    .padding(.bottom, 24)
+                }
             } else {
                 List {
                     ForEach(keys.keys) { key in
-                        row(key)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                Haptics.select()
-                                selected = key
-                            }
+                        Button {
+                            Haptics.select()
+                            selected = key
+                        } label: {
+                            row(key)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .onDelete(perform: delete)
                 }
@@ -39,12 +50,14 @@ struct KeysListView: View {
                     } label: {
                         Image(systemName: "square.and.arrow.down")
                     }
+                    .accessibilityLabel("Import")
                     Button {
                         Haptics.tap()
                         showGenerator = true
                     } label: {
                         Image(systemName: "plus")
                     }
+                    .accessibilityLabel("New Key")
                 }
             }
         }
@@ -56,6 +69,9 @@ struct KeysListView: View {
         }
         .sheet(item: $selected) { key in
             KeyDetailView(key: key)
+        }
+        .alert("Couldn't delete", isPresented: $deleteFailed) {
+            Button("OK") {}
         }
     }
 
@@ -95,9 +111,16 @@ struct KeysListView: View {
 
     private func delete(_ offsets: IndexSet) {
         // Snapshot first — each delete mutates the array and shifts
-        // the indexes the remaining offsets point at.
+        // the indexes the remaining offsets point at. The store
+        // persists the metadata removal BEFORE dropping the Keychain
+        // secret, and reports the outcome.
         let doomed = offsets.compactMap { keys.keys[safe: $0] }
-        for key in doomed { keys.delete(key) }
+        var failed = false
+        for key in doomed where !keys.delete(key) { failed = true }
+        if failed {
+            deleteFailed = true
+            Haptics.failed()
+        }
     }
 
     /// The base64 body only — the wire prefix ("ssh-ed25519 …") stays
@@ -124,10 +147,17 @@ private struct KeyDetailView: View {
     let key: StoredSSHKey
 
     @Environment(\.dismiss) private var dismiss
-    @State private var exportedPEM: String?
+    /// Temp `.key` file handed to the share sheet — the PEM never
+    /// travels as plain text.
+    @State private var exportedURL: URL?
     @State private var showExportSheet = false
     @State private var exportPassphrase = ""
     @State private var exportFailed = false
+    @State private var exporting = false
+    @State private var confirmPlainExport = false
+    /// Owned so Cancel can stop the vault work — and await it — before
+    /// the sheet goes away.
+    @State private var exportTask: Task<Void, Never>?
 
     private var canExport: Bool {
         !key.inSecureEnclave && key.type != .rsa
@@ -157,7 +187,7 @@ private struct KeyDetailView: View {
                     }
 
                     Text(KeysListView.publicKeyBody(key.publicKeyOpenSSH))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -197,7 +227,10 @@ private struct KeyDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(7)
                             .background(Color.primary.opacity(0.1), in: Circle())
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
+                    .accessibilityLabel("Close")
                 }
             }
             .sheet(isPresented: $showExportSheet) {
@@ -222,33 +255,47 @@ private struct KeyDetailView: View {
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Cancel") { showExportSheet = false }
+                            Button("Cancel") { closeExportSheet() }
                         }
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("Export") { exportPrivate() }
+                            if exporting {
+                                ProgressView()
+                            } else {
+                                Button("Export") { exportTapped() }
+                            }
                         }
                     }
                 }
-                .presentationDetents([.medium])
+                .interactiveDismissDisabled(exporting)
+                .presentationDetents([.medium, .large])
+                // Plaintext export only ever behind this explicit step.
+                .alert("Export without a passphrase?", isPresented: $confirmPlainExport) {
+                    Button("Export", role: .destructive) { startExport() }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("The file will contain the unencrypted private key.")
+                }
             }
             .sheet(
                 isPresented: Binding(
-                    get: { exportedPEM != nil },
-                    set: { if !$0 { exportedPEM = nil } }
+                    get: { exportedURL != nil },
+                    set: { if !$0 { finishShare() } }
                 )
             ) {
-                if let pem = exportedPEM {
-                    ShareLink(item: pem) {
-                        Label("Share", systemImage: "square.and.arrow.up")
-                            .font(.headline)
-                            .padding(.horizontal, 26)
-                            .padding(.vertical, 13)
-                            .terminalGlass(cornerRadius: 16)
+                if let url = exportedURL {
+                    ShareSheet(items: [url]) {
+                        // The temp copy served its purpose once the
+                        // share completes.
+                        try? FileManager.default.removeItem(at: url)
                     }
-                    .buttonStyle(.plain)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.terminalSurface.ignoresSafeArea())
-                    .presentationDetents([.height(160)])
+                }
+            }
+            .onDisappear {
+                exportTask?.cancel()
+                exportTask = nil
+                if let exportedURL {
+                    try? FileManager.default.removeItem(at: exportedURL)
+                    exportedURL = nil
                 }
             }
         }
@@ -263,24 +310,82 @@ private struct KeyDetailView: View {
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
-    private func exportPrivate() {
-        Task {
+    private func exportTapped() {
+        // No passphrase means plaintext — that needs one explicit yes.
+        if exportPassphrase.isEmpty {
+            confirmPlainExport = true
+        } else {
+            startExport()
+        }
+    }
+
+    private func startExport() {
+        // Snapshot now — the field is cleared the moment the share
+        // sheet closes, possibly while this task still runs.
+        let passphrase = exportPassphrase.isEmpty ? nil : exportPassphrase
+        exporting = true
+        exportFailed = false
+        exportTask = Task {
             guard await BiometricGate.evaluate(key.name) else {
+                exporting = false
                 exportFailed = true
                 Haptics.failed()
                 return
             }
             do {
-                exportedPEM = try KeyVault.exportPrivateKey(
-                    key,
-                    passphrase: exportPassphrase.isEmpty ? nil : exportPassphrase
-                )
+                try Task.checkCancellation()
+                let pem = try await KeyVault.exportPrivateKey(key, passphrase: passphrase)
+                try Task.checkCancellation()
+                let url = try writeExport(pem)
+                exporting = false
+                exportedURL = url
                 showExportSheet = false
+            } catch is CancellationError {
+                exporting = false
             } catch {
+                exporting = false
                 exportFailed = true
                 Haptics.failed()
             }
         }
+    }
+
+    /// Cancel stops the vault work and the sheet only leaves once the
+    /// task is really done — no PEM write can land after dismissal.
+    private func closeExportSheet() {
+        guard let task = exportTask else {
+            showExportSheet = false
+            return
+        }
+        exportTask = nil
+        task.cancel()
+        Task {
+            _ = await task.value
+            showExportSheet = false
+        }
+    }
+
+    /// Private material exports as a file, never as shared text.
+    private func writeExport(_ pem: String) throws -> URL {
+        var safe = key.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if safe.isEmpty { safe = "key" }
+        safe = safe.replacingOccurrences(of: "/", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(safe)
+            .appendingPathExtension("key")
+        try Data(pem.utf8).write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+        return url
+    }
+
+    /// Share sheet closed: drop the temp file and both secrets held in
+    /// state so nothing sensitive lingers.
+    private func finishShare() {
+        if let exportedURL {
+            try? FileManager.default.removeItem(at: exportedURL)
+        }
+        exportedURL = nil
+        exportPassphrase = ""
+        exportTask = nil
     }
 }
 
@@ -388,12 +493,20 @@ private struct KeyImportView: View {
                 let key = try await Task.detached(priority: .userInitiated) {
                     try KeyVault.`import`(pem: pem, name: name, passphrase: passphrase)
                 }.value
-                keys.save(key)
+                // A failed write keeps the form open — the key is in
+                // the keychain but wasn't persisted to the store.
+                guard keys.save(key) else {
+                    importing = false
+                    failure = String(localized: "Couldn't save")
+                    Haptics.failed()
+                    return
+                }
                 Haptics.connected()
                 dismiss()
             } catch {
                 importing = false
-                failure = (error as? SSHKeyImportError).map(Self.describe) ?? "Couldn't read this key"
+                failure = (error as? SSHKeyImportError).map(Self.describe)
+                    ?? String(localized: "Couldn't read this key")
                 Haptics.failed()
             }
         }
@@ -401,13 +514,13 @@ private struct KeyImportView: View {
 
     private static func describe(_ error: SSHKeyImportError) -> String {
         switch error {
-        case .invalidFormat: return "Not an OpenSSH private key"
-        case .encryptedNeedsPassphrase: return "This key needs its passphrase"
-        case .wrongPassphrase: return "Wrong passphrase"
-        case .unsupportedCipher(let c): return "Unsupported cipher: \(c)"
-        case .unsupportedKDF(let k): return "Unsupported KDF: \(k)"
-        case .unsupportedKeyType(let t): return "Unsupported key type: \(t)"
-        case .corrupt: return "The key material is corrupt"
+        case .invalidFormat: return String(localized: "Not an OpenSSH private key")
+        case .encryptedNeedsPassphrase: return String(localized: "This key needs its passphrase")
+        case .wrongPassphrase: return String(localized: "Wrong passphrase")
+        case .unsupportedCipher(let c): return String(localized: "Unsupported cipher: \(c)")
+        case .unsupportedKDF(let k): return String(localized: "Unsupported KDF: \(k)")
+        case .unsupportedKeyType(let t): return String(localized: "Unsupported key type: \(t)")
+        case .corrupt: return String(localized: "The key material is corrupt")
         }
     }
 }

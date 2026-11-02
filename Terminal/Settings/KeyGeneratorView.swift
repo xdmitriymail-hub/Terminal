@@ -13,6 +13,7 @@ struct KeyGeneratorView: View {
     @State private var name = ""
     @State private var type = StoredSSHKey.KeyType.ed25519
     @State private var requireBiometry = false
+    @State private var errorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -55,7 +56,17 @@ struct KeyGeneratorView: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
+        .alert(errorMessage ?? "", isPresented: errorPresented) {
+            Button("OK") { errorMessage = nil }
+        }
+    }
+
+    private var errorPresented: Binding<Bool> {
+        Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )
     }
 
     private func create() {
@@ -66,11 +77,18 @@ struct KeyGeneratorView: View {
                 name: trimmed.isEmpty ? "Key" : trimmed,
                 biometry: requireBiometry
             )
-            keys.save(key)
+            // A failed write keeps the sheet open — the keychain entry
+            // was made but nothing landed in the store.
+            guard keys.save(key) else {
+                errorMessage = String(localized: "Couldn't save")
+                Haptics.failed()
+                return
+            }
             Haptics.connected()
             onCreated?(key)
             dismiss()
         } catch {
+            errorMessage = String(localized: "Couldn't create this key")
             Haptics.failed()
         }
     }

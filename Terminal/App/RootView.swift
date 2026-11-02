@@ -21,6 +21,11 @@ struct RootView: View {
     @State private var hostKeyQueue: [(HostKeyEvent, CheckedContinuation<Bool, Never>)] = []
     @State private var hostKeyPromptActive = false
     @State private var clipboardRequest: ClipboardRequest?
+    @State private var clipboardQueue: [ClipboardRequest] = []
+    @State private var showServers = false
+    @State private var showSettings = false
+    @ObservedObject private var transferManager = TransferManager.shared
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         ZStack {
@@ -64,6 +69,7 @@ struct RootView: View {
             SecureField(session.profile.endpoint, text: $passwordText)
             Button("Connect") { submitPassword() }
             Button("Cancel", role: .cancel) {
+                engine.clearPasswordPrompt(for: session)
                 passwordSession = nil
                 passwordText = ""
             }
@@ -77,15 +83,21 @@ struct RootView: View {
         } message: {
             hostKeyMessage
         }
+        .sheet(isPresented: $showServers) {
+            NavigationStack { HostsListView(embeddedInStack: true) }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
         .confirmationDialog(
             "Allow Clipboard Write",
             isPresented: Binding(
                 get: { clipboardRequest != nil },
-                set: { if !$0 { clipboardRequest = nil } }
+                set: { if !$0 { resolveClipboard(false) } }
             ),
             titleVisibility: .visible
         ) {
-            Button("Allow Once") { resolveClipboard(true) }
+            Button("Allow This Session") { resolveClipboard(true) }
             Button("Deny", role: .cancel) { resolveClipboard(false) }
         } message: {
             if let request = clipboardRequest {
@@ -96,6 +108,17 @@ struct RootView: View {
             engine.hostKeyDecider = { event in
                 await askHostKeyTrust(event)
             }
+            // The engine cancels a prompt whose connection died — drop
+            // the UI side the same way.
+            engine.onHostKeyPromptDismissed = {
+                Task { @MainActor in dismissHostKeyPrompt() }
+            }
+            engine.onPasswordPromptDismissed = {
+                Task { @MainActor in
+                    passwordSession = nil
+                    passwordText = ""
+                }
+            }
             engine.onError = { message in
                 errorMessage = message
             }
@@ -103,13 +126,36 @@ struct RootView: View {
                 passwordSession = session
             }
             engine.onClipboardRequest = { session, data in
-                clipboardRequest = ClipboardRequest(session: session, data: data)
+                clipboardQueue.append(ClipboardRequest(session: session, data: data))
+                presentNextClipboard()
             }
-            keepAlive.setHasSessions(!engine.sessions.isEmpty)
+            syncKeepAlive()
+            FilePreviewView.purgeShareTemps()
+            // Cold start under lock: the scenePhase observer never fires
+            // for the initial .active, so sync the curtain here.
+            if appState.locked {
+                PrivacyOverlay.shared.update(visible: true, locked: true, appState: appState)
+                await appState.unlock()
+            }
         }
-        .onChange(of: engine.sessions.isEmpty) { _, empty in
-            keepAlive.setHasSessions(!empty)
+        .onChange(of: engine.sessions.isEmpty) { _, _ in
+            syncKeepAlive()
         }
+        .onChange(of: engine.sessions.map(\.state)) { _, _ in
+            syncKeepAlive()
+        }
+        .onChange(of: transferManager.activeCount) { _, _ in
+            syncKeepAlive()
+        }
+    }
+
+    /// Honest activity signal: live sessions plus transfers actually in
+    /// flight — offline tabs alone don't keep the audio engine up.
+    private func syncKeepAlive() {
+        keepAlive.updateActivity(
+            liveSessions: engine.sessions.filter { $0.state == .online }.count,
+            activeTransfers: TransferManager.shared.activeCount
+        )
     }
 
     // MARK: - Workspace
@@ -118,7 +164,10 @@ struct RootView: View {
         NavigationStack {
             ZStack {
                 ForEach(engine.sessions) { session in
-                    TerminalScreenView(session: session)
+                    TerminalScreenView(
+                        session: session,
+                        isActive: session.id == engine.activeSessionID
+                    )
                         .opacity(session.id == engine.activeSessionID ? 1 : 0)
                         .allowsHitTesting(session.id == engine.activeSessionID)
                         .zIndex(session.id == engine.activeSessionID ? 1 : 0)
@@ -168,6 +217,19 @@ struct RootView: View {
                     } label: {
                         Label("Reconnect", systemImage: "arrow.clockwise")
                     }
+                    Divider()
+                }
+                Button {
+                    showServers = true
+                } label: {
+                    Label("Servers", systemImage: "server.rack")
+                }
+                Button {
+                    showSettings = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                if activeSession != nil {
                     Divider()
                     Button(role: .destructive) {
                         if let s = activeSession { engine.closeSession(s) }
@@ -223,8 +285,9 @@ struct RootView: View {
         guard !text.isEmpty else { return }
         // If the store fails, reconnecting would re-prompt forever —
         // say so instead.
-        guard Keychain.save(text, tag: "password.\(session.profile.id.uuidString)") == errSecSuccess else {
-            errorMessage = "Couldn't store the password"
+        let status = Keychain.save(text, tag: "password.\(session.profile.id.uuidString)")
+        guard status == errSecSuccess else {
+            errorMessage = "Couldn't store the password (\(status))"
             return
         }
         session.reconnect()
@@ -243,6 +306,13 @@ struct RootView: View {
         guard !hostKeyPromptActive, let (event, _) = hostKeyQueue.first else { return }
         hostKeyPromptActive = true
         pendingHostKey = event
+    }
+
+    /// The connect attempt behind the front prompt was cancelled —
+    /// answer it with decline so its continuation unwinds cleanly.
+    private func dismissHostKeyPrompt() {
+        guard pendingHostKey != nil else { return }
+        resolveHostKey(false)
     }
 
     private func resolveHostKey(_ allow: Bool) {
@@ -301,12 +371,22 @@ struct RootView: View {
         let data: Data
     }
 
+    private func presentNextClipboard() {
+        guard clipboardRequest == nil else { return }
+        clipboardRequest = clipboardQueue.first
+    }
+
     private func resolveClipboard(_ allow: Bool) {
         guard let request = clipboardRequest else { return }
+        if !clipboardQueue.isEmpty { clipboardQueue.removeFirst() }
         clipboardRequest = nil
-        guard allow else { return }
-        request.session.clipboardAllowed = true
-        request.session.clipboardWrite(request.data)
+        if allow {
+            // Consent is scoped to this tab's lifetime — the label says
+            // exactly that, and a fresh session asks again.
+            request.session.clipboardAllowed = true
+            request.session.clipboardWrite(request.data)
+        }
+        presentNextClipboard()
     }
 }
 

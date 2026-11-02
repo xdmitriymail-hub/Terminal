@@ -38,14 +38,15 @@ struct StatusDot: View {
         Circle()
             .fill(color)
             .frame(width: 8, height: 8)
-            .opacity(pulse ? 0.35 : 1)
+            .opacity(animates && pulse ? 0.35 : 1)
             .animation(
                 animates
                     ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
                     : .default,
                 value: pulse
             )
-            .onAppear { pulse = true }
+            .onAppear { pulse = animates }
+            .onChange(of: animates) { _, on in pulse = on }
             .accessibilityLabel(Text("Status"))
             .accessibilityValue(Text(state.accessibilityText))
     }

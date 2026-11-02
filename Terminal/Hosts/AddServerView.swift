@@ -10,7 +10,6 @@ struct AddServerView: View {
     private let isEditing: Bool
 
     @State private var draft: ServerProfile
-    @State private var quick = ""
     @State private var password = ""
     @State private var useKey: Bool
     @State private var selectedKeyID: UUID?
@@ -38,29 +37,22 @@ struct AddServerView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("user@host", text: $quick)
-                        .font(.system(.body, design: .monospaced))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                        .submitLabel(.done)
-                        .onSubmit(applyQuick)
-                }
-
-                Section {
                     TextField("Name", text: $draft.name)
                     TextField("Host", text: $draft.host)
+                        .font(.system(.body, design: .monospaced))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                     TextField("Port", value: $draft.port, format: .number)
                         .keyboardType(.numberPad)
-                    TextField("Username", text: $draft.username)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
                 }
 
                 Section {
+                    TextField("Username", text: $draft.username)
+                        .font(.system(.body, design: .monospaced))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
                     Picker("Sign In", selection: $useKey) {
                         Text("Password").tag(false)
                         Text("Key").tag(true)
@@ -131,25 +123,6 @@ struct AddServerView: View {
         }
     }
 
-    // MARK: - Quick connect line
-
-    /// "ssh -p 2222 me@box" fills the form; the line is consumed once applied.
-    private func applyQuick() {
-        guard !quick.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        guard let parsed = QuickConnectParser.parse(quick, profiles: profiles.profiles) else {
-            return
-        }
-        draft.host = parsed.profile.host
-        draft.port = parsed.profile.port
-        draft.username = parsed.profile.username
-        if let pw = parsed.password {
-            password = pw
-            useKey = false
-        }
-        Haptics.select()
-        quick = ""
-    }
-
     /// A key created in KeyGeneratorView lands in KeysStore — pick it up.
     private func adoptNewKey() {
         guard let fresh = keys.keys.first(where: { !keyIDsBefore.contains($0.id) }) else { return }
@@ -167,7 +140,6 @@ struct AddServerView: View {
     // MARK: - Save
 
     private func save() {
-        applyQuick()
         draft.host = draft.host.trimmingCharacters(in: .whitespaces)
         draft.username = draft.username.trimmingCharacters(in: .whitespaces)
         if !(1...65535).contains(draft.port) { draft.port = 22 }
@@ -177,16 +149,15 @@ struct AddServerView: View {
             return
         }
 
+        let newAuth: ServerProfile.Auth
         if useKey {
             guard let selectedKeyID else {
                 Haptics.failed()
                 return
             }
-            draft.auth = .key(selectedKeyID)
-            // A stored password would linger unused — drop it.
-            Keychain.delete("password.\(draft.id.uuidString)")
+            newAuth = .key(selectedKeyID)
         } else {
-            draft.auth = .password
+            newAuth = .password
             if !password.isEmpty {
                 // Keep the form open when the secret can't be stored —
                 // saving without it would lock the user out next time.
@@ -197,8 +168,19 @@ struct AddServerView: View {
                 }
             }
         }
+        draft.auth = newAuth
 
-        profiles.save(draft)
+        // Commit the profile first — only then is it safe to drop a
+        // now-unused stored password.
+        guard profiles.save(draft) else {
+            Haptics.failed()
+            errorMessage = "Couldn't save the server"
+            return
+        }
+        if case .key = newAuth {
+            Keychain.delete("password.\(draft.id.uuidString)")
+        }
+
         // Edited host/auth must not keep a stale pooled transport or a
         // warm SFTP channel pointing at the old endpoint.
         engine.invalidateConnection(for: draft.id)

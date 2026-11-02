@@ -5,9 +5,9 @@ import SwiftUI
 struct ThemePickerView: View {
     @EnvironmentObject private var settings: SettingsStore
 
+    /// Two columns on a phone, more in landscape or on iPad.
     private let columns = [
-        GridItem(.flexible(), spacing: 14),
-        GridItem(.flexible(), spacing: 14)
+        GridItem(.adaptive(minimum: 150), spacing: 14)
     ]
 
     var body: some View {
@@ -43,38 +43,42 @@ private struct ThemeCardView: View {
     let onTap: () -> Void
 
     var body: some View {
-        VStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("$ top")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(theme.foreground)
-                HStack(spacing: 4) {
-                    Text(">")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(theme.foreground.opacity(0.65))
-                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(theme.cursor)
-                        .frame(width: 7, height: 11)
+        Button(action: onTap) {
+            VStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("$ top")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(theme.foreground)
+                    HStack(spacing: 4) {
+                        Text(">")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(theme.foreground.opacity(0.65))
+                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                            .fill(theme.cursor)
+                            .frame(width: 7, height: 11)
+                    }
                 }
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, minHeight: 74, alignment: .topLeading)
-            .background(theme.background)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(
-                        isSelected ? Color.terminalAccent : Color.primary.opacity(0.08),
-                        lineWidth: isSelected ? 2 : 1
-                    )
-            }
+                .padding(10)
+                .frame(maxWidth: .infinity, minHeight: 74, alignment: .topLeading)
+                .background(theme.background)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(
+                            isSelected ? Color.terminalAccent : Color.primary.opacity(0.08),
+                            lineWidth: isSelected ? 2 : 1
+                        )
+                }
 
-            Text(theme.displayName)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(isSelected ? Color.terminalAccent : .primary)
+                Text(theme.displayName)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(isSelected ? Color.terminalAccent : .primary)
+            }
+            .contentShape(Rectangle())
         }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityLabel(theme.displayName)
     }
 }
 
@@ -84,26 +88,30 @@ private struct AutoThemeCard: View {
     let onTap: () -> Void
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 0) {
-                mini(.pro)
-                mini(.paper)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(
-                        isSelected ? Color.terminalAccent : Color.primary.opacity(0.08),
-                        lineWidth: isSelected ? 2 : 1
-                    )
-            }
+        Button(action: onTap) {
+            VStack(spacing: 8) {
+                HStack(spacing: 0) {
+                    mini(.pro)
+                    mini(.paper)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(
+                            isSelected ? Color.terminalAccent : Color.primary.opacity(0.08),
+                            lineWidth: isSelected ? 2 : 1
+                        )
+                }
 
-            Text("Auto")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(isSelected ? Color.terminalAccent : .primary)
+                Text("Auto")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(isSelected ? Color.terminalAccent : .primary)
+            }
+            .contentShape(Rectangle())
         }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityLabel("Auto")
     }
 
     private func mini(_ theme: TerminalTheme) -> some View {

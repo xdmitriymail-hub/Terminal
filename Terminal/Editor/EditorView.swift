@@ -104,7 +104,8 @@ private final class TerminalEditorTheme: Theme {
         dark: UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1),
         light: UIColor(red: 0.99, green: 0.99, blue: 1, alpha: 1)
     )
-    let font: UIFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
+    let font: UIFont = UIFontMetrics(forTextStyle: .body)
+        .scaledFont(for: .monospacedSystemFont(ofSize: 14, weight: .regular))
     let textColor = adaptive(
         dark: UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1),
         light: UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1)
@@ -121,7 +122,8 @@ private final class TerminalEditorTheme: Theme {
         dark: UIColor.white.withAlphaComponent(0.28),
         light: UIColor.black.withAlphaComponent(0.3)
     )
-    let lineNumberFont: UIFont = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    let lineNumberFont: UIFont = UIFontMetrics(forTextStyle: .caption1)
+        .scaledFont(for: .monospacedSystemFont(ofSize: 12, weight: .regular))
     let selectedLineBackgroundColor = adaptive(
         dark: UIColor.white.withAlphaComponent(0.05),
         light: UIColor.black.withAlphaComponent(0.05)

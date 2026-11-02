@@ -46,7 +46,7 @@ struct SettingsView: View {
 
                 Section {
                     Toggle(isOn: $settings.settings.keepAlive) {
-                        rowLabel("Background sessions", icon: "antenna.radiowaves.left.and.right")
+                        rowLabel("Keep-alive audio", icon: "antenna.radiowaves.left.and.right")
                     }
                     .onChange(of: settings.settings.keepAlive) { _, on in
                         keepAlive.setEnabled(on)

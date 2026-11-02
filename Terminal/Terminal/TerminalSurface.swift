@@ -10,6 +10,9 @@ struct TerminalSurface: UIViewRepresentable {
     var accessory: UIView?
     /// Sticky Ctrl/Alt from the accessory bar — applies to typed keys.
     var modifiers: ModifierState?
+    /// Inactive tabs must not hold the first responder — a hidden
+    /// surface would keep the keyboard up over the visible one.
+    var isActive = true
 
     func makeUIView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
@@ -18,6 +21,7 @@ struct TerminalSurface: UIViewRepresentable {
         view.inputAccessoryView = accessory
         view.backgroundColor = theme.uiBackground
         context.coordinator.attach(session: session, view: view, modifiers: modifiers)
+        context.coordinator.appliedStyle = Coordinator.StyleSignature(fontSize: fontSize, theme: theme)
         return view
     }
 
@@ -29,7 +33,15 @@ struct TerminalSurface: UIViewRepresentable {
             applyStyle(view)
             context.coordinator.appliedStyle = signature
         }
-        view.inputAccessoryView = accessory
+        // reloadInputViews on an unchanged accessory steals/represents
+        // the keyboard — only reload when the view actually swapped.
+        if view.inputAccessoryView !== accessory {
+            view.inputAccessoryView = accessory
+            if view.isFirstResponder { view.reloadInputViews() }
+        }
+        if !isActive, view.isFirstResponder {
+            _ = view.resignFirstResponder()
+        }
         context.coordinator.modifiers = modifiers
     }
 
@@ -69,6 +81,16 @@ struct TerminalSurface: UIViewRepresentable {
             session.attachOutput { [weak view] bytes in
                 view?.feed(byteArray: bytes)
             }
+            // Hide targets THIS terminal, not whichever responder a
+            // global sendAction happens to find.
+            (view.inputAccessoryView as? KeyboardAccessoryView)?.onHide = { [weak view] in
+                _ = view?.resignFirstResponder()
+                view?.window?.endEditing(true)
+            }
+            // Swipe-to-dismiss on the terminal's scroll view.
+            view.subviews
+                .compactMap { $0 as? UIScrollView }
+                .forEach { $0.keyboardDismissMode = .interactive }
         }
 
         func detach() {
@@ -89,8 +111,8 @@ struct TerminalSurface: UIViewRepresentable {
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            let bytes = modifiers?.apply(to: Array(data)) ?? Array(data)
-            session?.send(bytes[...])
+            // Semantic Ctrl/Alt + CR-normalization live in the session.
+            session?.sendUserInput(Array(data))
         }
 
         func scrolled(source: TerminalView, position: Double) {}
@@ -102,9 +124,9 @@ struct TerminalSurface: UIViewRepresentable {
 
         func bell(source: TerminalView) {
             // A runaway `yes | xargs -I{} printf '\a'` must not hammer
-            // the haptic engine — coalesce to 10 Hz.
+            // the haptic engine — coalesce to 2 Hz.
             let now = Date()
-            guard now.timeIntervalSince(lastBell) > 0.1 else { return }
+            guard now.timeIntervalSince(lastBell) > 0.5 else { return }
             lastBell = now
             Haptics.bell()
         }

@@ -124,7 +124,18 @@ enum BCryptPBKDF {
     /// OpenBSD bcrypt_pbkdf: blocks are interleaved across the output —
     /// byte i of block c lands at key[i * stride + (c - 1)].
     static func pbkdf(password: Data, salt: Data, keyLength: Int, rounds: Int) -> Data {
+        // The `false` check can never fire — the try! cannot throw.
+        // swiftlint:disable-next-line force_try
+        try! pbkdf(password: password, salt: salt, keyLength: keyLength, rounds: rounds, isCancelled: { false })
+    }
+
+    /// Cooperatively-cancellable variant: `isCancelled` is polled once
+    /// per bcrypt round (and once per output block), throwing
+    /// `CancellationError` so a detached UI task unwinds promptly
+    /// instead of hashing for seconds after the user navigated away.
+    static func pbkdf(password: Data, salt: Data, keyLength: Int, rounds: Int, isCancelled: () -> Bool) throws -> Data {
         guard keyLength > 0, rounds > 0 else { return Data() }
+        if isCancelled() { throw CancellationError() }
         let stride = (keyLength + 31) / 32
         let amount = (keyLength + stride - 1) / stride
         var key = Data(repeating: 0, count: keyLength)
@@ -133,6 +144,7 @@ enum BCryptPBKDF {
         var remaining = keyLength
         var count: UInt32 = 1
         while remaining > 0 {
+            if isCancelled() { throw CancellationError() }
             var countsalt = Data(salt)
             var bigCount = count.bigEndian
             countsalt.append(Data(bytes: &bigCount, count: 4))
@@ -141,6 +153,7 @@ enum BCryptPBKDF {
             var tmp = hash(sha2pass: sha2pass, sha2salt: [UInt8](sha2salt))
             var block = tmp
             for _ in 1..<rounds {
+                if isCancelled() { throw CancellationError() }
                 sha2salt = Data(SHA512.hash(data: tmp))
                 tmp = hash(sha2pass: sha2pass, sha2salt: [UInt8](sha2salt))
                 for j in 0..<32 { block[j] ^= tmp[j] }

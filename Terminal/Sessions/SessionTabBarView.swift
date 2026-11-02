@@ -42,9 +42,11 @@ struct SessionTabBarView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .frame(width: 32, height: 32)
                         .background(Color.primary.opacity(0.09), in: Circle())
-                        .contentShape(Circle())
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("New session")
 
                 Button {
                     Haptics.tap()
@@ -54,13 +56,15 @@ struct SessionTabBarView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .frame(width: 32, height: 32)
                         .background(Color.primary.opacity(0.09), in: Circle())
-                        .contentShape(Circle())
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Sessions")
             }
             .padding(.trailing, 6)
         }
-        .frame(height: 44)
+        .frame(minHeight: 44)
         .terminalGlass(cornerRadius: 22)
         .padding(.horizontal, 12)
     }
@@ -84,11 +88,11 @@ private struct SessionPillView: View {
             HStack(spacing: 7) {
                 StatusDot(state: StatusDot.State(session.state))
                 Text(session.title)
-                    .font(.system(size: 14, weight: isActive ? .semibold : .regular))
+                    .font(.system(.subheadline, weight: isActive ? .semibold : .regular))
                     .lineLimit(1)
             }
             .padding(.horizontal, 12)
-            .frame(height: 34)
+            .frame(minHeight: 34)
             .background(
                 Capsule(style: .continuous)
                     .fill(Color.primary.opacity(isActive ? 0.16 : 0))
@@ -97,6 +101,7 @@ private struct SessionPillView: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(isActive ? .primary : .secondary)
+        .accessibilityAddTraits(isActive ? .isSelected : [])
         .contextMenu {
             Button {
                 session.reconnect()

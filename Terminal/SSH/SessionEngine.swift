@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import Network
+import UIKit
 import Citadel
 import NIOSSH
 
@@ -15,6 +16,20 @@ final class SessionEngine: ObservableObject {
     private var forwardServices: [UUID: PortForwardService] = [:]
     private var pathMonitor: NWPathMonitor?
     private var keepAliveTimer: Timer?
+    private var observerTokens: [NSObjectProtocol] = []
+
+    /// A pending host-key decision: id makes resume exactly-once, the
+    /// owning profile lets a dead connect retire precisely its prompt.
+    private struct PendingHostKey {
+        let profileID: UUID
+        let event: HostKeyEvent
+        let resume: (Bool) -> Void
+    }
+    private var pendingHostKeys: [UUID: PendingHostKey] = [:]
+
+    /// Sessions waiting on a password, per connection — a terminated
+    /// session's request is retired instead of left hanging.
+    private var passwordQueue: [UUID] = []
 
     let profiles: ProfilesStore
     let keys: KeysStore
@@ -23,6 +38,14 @@ final class SessionEngine: ObservableObject {
 
     /// Set by UI layer: asks the user to confirm unknown/changed host keys.
     var hostKeyDecider: (@MainActor (HostKeyEvent) async -> Bool)?
+
+    /// Set by UI layer: a host-key prompt it may be showing was resolved
+    /// or cancelled underneath it — remove the dialog without answering.
+    var onHostKeyPromptDismissed: (@Sendable () -> Void)?
+
+    /// Set by UI layer: the pending password prompt must come down
+    /// (its session terminated or authenticated through another path).
+    var onPasswordPromptDismissed: (@Sendable () -> Void)?
 
     /// Set by UI layer: surface an error as a gentle alert.
     var onError: (@MainActor (String) -> Void)?
@@ -53,6 +76,13 @@ final class SessionEngine: ObservableObject {
         self.settings = settings
         startPathMonitor()
         startKeepAlive()
+        observeLifecycle()
+    }
+
+    deinit {
+        observerTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        keepAliveTimer?.invalidate()
+        pathMonitor?.cancel()
     }
 
     // MARK: - Connection pool
@@ -65,11 +95,11 @@ final class SessionEngine: ObservableObject {
                 guard let self else { throw KeyVaultError.keyMaterialMissing }
                 return try await self.buildAuth(for: profile)
             },
-            validatorFor: { [weak self] host, port in
+            validatorFor: { [weak self] profile in
                 guard let self else {
-                    return HostKeyTrustValidator(host: host, port: port, knownKey: nil) { _ in false }
+                    return HostKeyTrustValidator(host: profile.host, port: profile.port, knownKey: nil) { _ in false }
                 }
-                return await self.makeValidator(host: host, port: port)
+                return await self.makeValidator(for: profile)
             },
             bastionResolver: { [weak self] jumpID in
                 guard let self, let jumpProfile = await self.profiles.profiles.first(where: { $0.id == jumpID }) else {
@@ -82,7 +112,16 @@ final class SessionEngine: ObservableObject {
                 }
                 return await self.connection(for: jumpProfile)
             },
-            onStateChange: { _ in }
+            onStateChange: { [weak self] state in
+                Task { @MainActor in
+                    self?.transportStateChanged(profileID: profile.id, state: state)
+                }
+            },
+            onConnectSettled: { [weak self] in
+                Task { @MainActor in
+                    self?.cancelHostKeyPrompts(profileID: profile.id)
+                }
+            }
         )
         connections[profile.id] = connection
         return connection
@@ -106,7 +145,16 @@ final class SessionEngine: ObservableObject {
         switch profile.auth {
         case .password:
             // Never ship an empty password — the caller prompts first.
-            guard let password = Keychain.loadString(tag: "password.\(profile.id.uuidString)"),
+            // Distinguish "no password stored" from a locked/denied
+            // keychain: only the former should ask the user to type one.
+            let tag = "password.\(profile.id.uuidString)"
+            let (data, status) = Keychain.loadWithStatus(tag: tag)
+            guard status == errSecSuccess else {
+                throw status == errSecItemNotFound
+                    ? KeyVaultError.keyMaterialMissing
+                    : KeyVaultError.keychainFailure(status)
+            }
+            guard let password = data.flatMap({ String(data: $0, encoding: .utf8) }),
                   !password.isEmpty else {
                 throw KeyVaultError.keyMaterialMissing
             }
@@ -119,25 +167,90 @@ final class SessionEngine: ObservableObject {
         }
     }
 
-    private func makeValidator(host: String, port: Int) -> NIOSSHClientServerAuthenticationDelegate {
-        let known = knownHosts.known(host: host, port: port)?.publicKeyOpenSSH
-        return HostKeyTrustValidator(host: host, port: port, knownKey: known) { [weak self] event in
+    // MARK: - Host key prompts
+
+    private func makeValidator(for profile: ServerProfile) -> NIOSSHClientServerAuthenticationDelegate {
+        let known = knownHosts.known(host: profile.host, port: profile.port)?.publicKeyOpenSSH
+        return HostKeyTrustValidator(host: profile.host, port: profile.port, knownKey: known) { [weak self] event in
             guard let self else { return false }
-            switch event {
-            case .unknown(let h, let p, let line, _):
-                if await (self.hostKeyDecider?(event) ?? false) {
-                    await self.knownHosts.trust(host: h, port: p, publicKeyOpenSSH: line)
-                    return true
-                }
-                return false
-            case .changed(let h, let p, let line, _, _):
-                if await (self.hostKeyDecider?(event) ?? false) {
-                    await self.knownHosts.trust(host: h, port: p, publicKeyOpenSSH: line)
-                    return true
-                }
-                return false
+            return await self.decideHostKey(profileID: profile.id, event: event)
+        }
+    }
+
+    /// Races the UI answer against connection teardown: whichever lands
+    /// first resumes the continuation; the loser finds the slot gone.
+    private func decideHostKey(profileID: UUID, event: HostKeyEvent) async -> Bool {
+        await withCheckedContinuation { cont in
+            let requestID = UUID()
+            pendingHostKeys[requestID] = PendingHostKey(profileID: profileID, event: event) { answer in
+                cont.resume(returning: answer)
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let answer = await self.hostKeyDecider?(event) ?? false
+                self.resolveHostKeyPrompt(requestID, answer: answer)
             }
         }
+    }
+
+    private func resolveHostKeyPrompt(_ id: UUID, answer: Bool) {
+        guard let pending = pendingHostKeys.removeValue(forKey: id) else { return }
+        if answer {
+            persistTrust(for: pending.event)
+        }
+        pending.resume(answer)
+    }
+
+    /// Trust persistence must never silently masquerade as permanent:
+    /// a failed save still applies to this handshake, but the key is
+    /// NOT in the store — the next connect asks again, and the user is
+    /// told why instead of assuming the key stuck.
+    private func persistTrust(for event: HostKeyEvent) {
+        switch event {
+        case .unknown(let host, let port, let line, _),
+             .changed(let host, let port, let line, _, _):
+            if !knownHosts.trust(host: host, port: port, publicKeyOpenSSH: line) {
+                onError?("Couldn't save the host key — you'll be asked again")
+            }
+        }
+    }
+
+    /// Every pending prompt owned by this profile resolves as rejected
+    /// and the UI is told to drop the dialog — a closed tab never
+    /// leaves a frozen trust sheet behind.
+    private func cancelHostKeyPrompts(profileID: UUID) {
+        let doomed = pendingHostKeys.filter { $0.value.profileID == profileID }
+        guard !doomed.isEmpty else { return }
+        for (id, pending) in doomed {
+            pendingHostKeys[id] = nil
+            pending.resume(false)
+        }
+        onHostKeyPromptDismissed?()
+    }
+
+    // MARK: - Password prompts
+
+    /// Queues the session's auth request and lets the UI ask. Every
+    /// call is a genuine new ask — a stale queue entry left by a
+    /// user-dismissed prompt must never suppress it.
+    func authNeeded(_ session: TerminalSession) {
+        if !passwordQueue.contains(session.id) {
+            passwordQueue.append(session.id)
+        }
+        onAuthNeeded?(session)
+    }
+
+    /// Retires a session's password request — authenticated, cancelled
+    /// by the user, or terminated. The UI drops any prompt it shows.
+    func clearPasswordPrompt(for session: TerminalSession) {
+        guard passwordQueue.contains(session.id) else { return }
+        passwordQueue.removeAll { $0 == session.id }
+        onPasswordPromptDismissed?()
+    }
+
+    /// A session is going away: its pending prompts die with it.
+    func sessionTerminated(_ session: TerminalSession) {
+        clearPasswordPrompt(for: session)
     }
 
     /// Drops the cached tmux answer for a profile (e.g. after a rebuild).
@@ -147,8 +260,10 @@ final class SessionEngine: ObservableObject {
 
     /// Drops a pooled transport (e.g. when profile secrets changed).
     func invalidateConnection(for profileID: UUID) {
-        forwardServices[profileID]?.stopAll()
-        forwardServices[profileID] = nil
+        cancelHostKeyPrompts(profileID: profileID)
+        if let service = forwardServices.removeValue(forKey: profileID) {
+            Task { await service.stopAll() }
+        }
         if let conn = connections.removeValue(forKey: profileID) {
             Task { await conn.close() }
         }
@@ -177,17 +292,28 @@ final class SessionEngine: ObservableObject {
         guard profile.forwards.contains(where: \.enabled) else { return }
         let service = forwardServices[profile.id] ?? PortForwardService(connection: connection(for: profile))
         forwardServices[profile.id] = service
-        await service.startAll(rules: profile.forwards)
+        await service.applyRules(profile.forwards)
     }
 
-    /// Called when a profile's forward rules change — restarts the set.
+    /// Called when a profile's forward rules change — refreshes the set.
+    /// Refreshes serialize inside the service; a stale result never
+    /// overwrites a newer rule state.
     func refreshForwards(for profile: ServerProfile) async {
         guard let service = forwardServices[profile.id] else {
             await applyForwards(for: profile)
             return
         }
-        service.stopAll()
-        await service.startAll(rules: profile.forwards)
+        await service.applyRules(profile.forwards)
+    }
+
+    /// Live runtime state for the UI: rule id → starting/ready/failed.
+    func forwardRuntime(for profile: ServerProfile) -> [UUID: ForwardRuntimeState] {
+        forwardServices[profile.id]?.runtime ?? [:]
+    }
+
+    /// The service object itself, for UI that wants @Published updates.
+    func forwardsService(for profile: ServerProfile) -> PortForwardService? {
+        forwardServices[profile.id]
     }
 
     /// Surfaces a readable session failure as a quiet alert.
@@ -205,6 +331,63 @@ final class SessionEngine: ObservableObject {
 
     // MARK: - Resilience
 
+    /// The pooled transport changed state: online re-applies forwards
+    /// (remote rules live per-transport); offline tells live sessions
+    /// their transport is gone so retry can start before the channel's
+    /// own close event even lands.
+    private func transportStateChanged(profileID: UUID, state: SSHConnection.State) {
+        switch state {
+        case .online:
+            guard let profile = profiles.profiles.first(where: { $0.id == profileID }) else { return }
+            Task { await applyForwards(for: profile) }
+        case .offline:
+            for session in sessions where session.profile.id == profileID {
+                session.noteTransportLost()
+            }
+        case .connecting:
+            break
+        }
+    }
+
+    private func observeLifecycle() {
+        let center = NotificationCenter.default
+        observerTokens.append(center.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.resumeForegroundWork()
+                await self?.probeConnections()
+            }
+        })
+        observerTokens.append(center.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                await self?.suspendBackgroundWork()
+            }
+        })
+    }
+
+    /// Backgrounding stops the probe cadence and abandons in-flight
+    /// probes — suspended sockets shouldn't hold channels open.
+    private func suspendBackgroundWork() async {
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+        for (_, conn) in connections {
+            await conn.cancelProbe()
+        }
+    }
+
+    private func resumeForegroundWork() {
+        if keepAliveTimer == nil {
+            startKeepAlive()
+        }
+    }
+
     private func startPathMonitor() {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
@@ -218,8 +401,9 @@ final class SessionEngine: ObservableObject {
         pathMonitor = monitor
     }
 
-    /// After a network change, verify pooled connections still answer;
-    /// silently reconnect dead ones so sessions come back instantly.
+    /// After a network change or foregrounding, verify pooled
+    /// connections still answer; silently reconnect dead ones so
+    /// sessions come back instantly.
     private func probeConnections() async {
         await probeAllConnections()
         guard settings.settings.autoReconnect else { return }
@@ -246,7 +430,7 @@ final class SessionEngine: ObservableObject {
     private func startKeepAlive() {
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                await self?.probeAllConnections()
+                await self?.probeConnections()
             }
         }
         keepAliveTimer?.tolerance = 5

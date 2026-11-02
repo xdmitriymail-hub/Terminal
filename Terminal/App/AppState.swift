@@ -27,6 +27,14 @@ final class AppState: ObservableObject {
         }
         Haptics.setEnabled(settings.settings.haptics)
         keepAlive.setEnabled(settings.settings.keepAlive)
+        keys.removeOrphanedSecrets()
+    }
+
+    /// Backgrounding re-arms the lock when the policy is on — the app
+    /// must be locked again after every return, not only at launch.
+    func lock() {
+        guard settings.settings.requireBiometry else { return }
+        locked = true
     }
 
     /// Single evaluation at a time — a cancelled prompt followed by a

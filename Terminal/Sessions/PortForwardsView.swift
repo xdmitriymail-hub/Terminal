@@ -7,20 +7,36 @@ struct PortForwardsView: View {
     @EnvironmentObject private var engine: SessionEngine
     @State private var profile: ServerProfile
     @State private var adding = false
+    @State private var saveFailed = false
 
     init(profile: ServerProfile) {
         _profile = State(initialValue: profile)
     }
 
     private func persist() {
-        profiles.save(profile)
+        if !profiles.save(profile) {
+            saveFailed = true
+            Haptics.failed()
+        }
         Task { await engine.refreshForwards(for: profile) }
     }
 
     var body: some View {
         Group {
             if profile.forwards.isEmpty {
-                EmptyState(symbol: "point.topleft.down.curvedto.point.bottomright.up")
+                VStack {
+                    EmptyState(
+                        symbol: "point.topleft.down.curvedto.point.bottomright.up",
+                        text: String(localized: "No forwards")
+                    )
+                    Button("Add") {
+                        Haptics.tap()
+                        adding = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.terminalAccent)
+                    .padding(.bottom, 24)
+                }
             } else {
                 List {
                     ForEach(profile.forwards) { forward in
@@ -42,6 +58,7 @@ struct PortForwardsView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .accessibilityLabel("Add")
             }
         }
         .sheet(isPresented: $adding) {
@@ -49,6 +66,9 @@ struct PortForwardsView: View {
                 profile.forwards.append(forward)
                 persist()
             }
+        }
+        .alert("Couldn't save", isPresented: $saveFailed) {
+            Button("OK") {}
         }
     }
 
@@ -67,10 +87,15 @@ struct PortForwardsView: View {
 
             Spacer()
 
+            if forward.enabled, let service = engine.forwardsService(for: profile) {
+                ForwardStatusView(service: service, id: forward.id)
+            }
+
             Toggle(isOn: enabledBinding(for: forward.id)) {
                 EmptyView()
             }
             .labelsHidden()
+            .accessibilityLabel(":\(forward.listenPort) → \(forward.targetHost):\(forward.targetPort)")
         }
         .padding(.vertical, 2)
     }
@@ -96,6 +121,33 @@ struct PortForwardsView: View {
         case .local: return "arrow.right.circle"
         case .remote: return "arrow.left.circle"
         case .dynamic: return "network"
+        }
+    }
+}
+
+/// Live rule state from the engine — starting spins, ready is a dot,
+/// failed shows the warning glyph.
+private struct ForwardStatusView: View {
+    @ObservedObject var service: PortForwardService
+    let id: UUID
+
+    var body: some View {
+        switch service.runtime[id] {
+        case .starting:
+            ProgressView()
+                .controlSize(.mini)
+        case .ready:
+            Circle()
+                .fill(Color.terminalAccent)
+                .frame(width: 7, height: 7)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.red)
+        case .stopped, nil:
+            Circle()
+                .fill(.secondary.opacity(0.4))
+                .frame(width: 7, height: 7)
         }
     }
 }
@@ -164,7 +216,7 @@ private struct ForwardEditorView: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
     }
 
     private func add() {

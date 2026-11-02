@@ -3,13 +3,13 @@ import UIKit
 
 /// Window-level privacy curtain. A root-view overlay can't cover sheets
 /// or alerts, so the curtain lives in its own UIWindow one level above
-/// them — content is hidden in the app switcher and while locked.
+/// them — one per scene, so multi-window iPad sessions are covered too.
 @MainActor
 final class PrivacyOverlay {
     static let shared = PrivacyOverlay()
 
-    private var window: UIWindow?
-    private var host: UIHostingController<PrivacyCurtainView>?
+    private var windows: [ObjectIdentifier: UIWindow] = [:]
+    private var hosts: [ObjectIdentifier: UIHostingController<PrivacyCurtainView>] = [:]
     private var hideTask: Task<Void, Never>?
 
     func update(visible: Bool, locked: Bool, appState: AppState) {
@@ -29,28 +29,40 @@ final class PrivacyOverlay {
     }
 
     private func show(locked: Bool, appState: AppState) {
-        if window == nil {
-            guard let scene = UIApplication.shared.connectedScenes
-                .compactMap({ $0 as? UIWindowScene })
-                .first(where: { $0.activationState != .unattached }) else { return }
-            let window = UIWindow(windowScene: scene)
-            window.windowLevel = .alert + 1
-            let host = UIHostingController(rootView: PrivacyCurtainView(locked: false, onUnlock: {}))
-            host.view.backgroundColor = .clear
-            window.rootViewController = host
-            self.window = window
-            self.host = host
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState != .unattached }
+
+        // Drop windows whose scene went away.
+        let live = Set(scenes.map { ObjectIdentifier($0) })
+        for id in windows.keys where !live.contains(id) {
+            windows[id]?.isHidden = true
+            windows[id] = nil
+            hosts[id] = nil
         }
-        host?.rootView = PrivacyCurtainView(locked: locked) {
-            Task { await appState.unlock() }
+
+        for scene in scenes {
+            let id = ObjectIdentifier(scene)
+            if windows[id] == nil {
+                let window = UIWindow(windowScene: scene)
+                window.windowLevel = .alert + 1
+                let host = UIHostingController(rootView: PrivacyCurtainView(locked: false, onUnlock: {}))
+                host.view.backgroundColor = .clear
+                window.rootViewController = host
+                windows[id] = window
+                hosts[id] = host
+            }
+            hosts[id]?.rootView = PrivacyCurtainView(locked: locked) {
+                Task { await appState.unlock() }
+            }
+            windows[id]?.isHidden = false
         }
-        window?.isHidden = false
     }
 
     private func hide() {
-        window?.isHidden = true
-        window = nil
-        host = nil
+        for (_, window) in windows { window.isHidden = true }
+        windows.removeAll()
+        hosts.removeAll()
     }
 }
 
@@ -62,7 +74,7 @@ private struct PrivacyCurtainView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color(uiColor: .systemBackground).ignoresSafeArea()
             VStack(spacing: 22) {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 28, weight: .light))

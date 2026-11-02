@@ -8,6 +8,7 @@ struct SnippetBar: View {
     @EnvironmentObject private var snippets: SnippetsStore
     @State private var adding = false
     @State private var editing: Snippet?
+    @State private var deleteFailed = false
 
     init(session: TerminalSession) {
         self.session = session
@@ -30,6 +31,9 @@ struct SnippetBar: View {
         .sheet(item: $editing) { snippet in
             AddSnippetView(snippet: snippet)
         }
+        .alert("Couldn't delete", isPresented: $deleteFailed) {
+            Button("OK") {}
+        }
     }
 
     private func chip(for snippet: Snippet) -> some View {
@@ -41,7 +45,7 @@ struct SnippetBar: View {
                 .font(.system(.footnote, design: .monospaced))
                 .lineLimit(1)
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .frame(minHeight: 34)
                 .terminalGlass(cornerRadius: 16)
                 .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
@@ -53,8 +57,12 @@ struct SnippetBar: View {
                 Label("Edit", systemImage: "pencil")
             }
             Button(role: .destructive) {
-                Haptics.tap()
-                snippets.delete(snippet)
+                if snippets.delete(snippet) {
+                    Haptics.tap()
+                } else {
+                    deleteFailed = true
+                    Haptics.failed()
+                }
             } label: {
                 Label("Delete", systemImage: "trash")
             }
@@ -69,7 +77,7 @@ struct SnippetBar: View {
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .frame(minHeight: 34)
                 .terminalGlass(cornerRadius: 16)
                 .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }

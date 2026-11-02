@@ -10,6 +10,7 @@ struct AddSnippetView: View {
     @State private var title: String
     @State private var command: String
     @State private var autoEnter: Bool
+    @State private var saveFailed = false
 
     init(snippet: Snippet? = nil) {
         existing = snippet
@@ -60,6 +61,9 @@ struct AddSnippetView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .alert("Couldn't save", isPresented: $saveFailed) {
+            Button("OK") {}
+        }
     }
 
     private func save() {
@@ -67,7 +71,12 @@ struct AddSnippetView: View {
         snippet.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         snippet.command = command
         snippet.autoEnter = autoEnter
-        snippets.save(snippet)
+        // A failed write keeps the sheet open — nothing was persisted.
+        guard snippets.save(snippet) else {
+            saveFailed = true
+            Haptics.failed()
+            return
+        }
         Haptics.connected()
         dismiss()
     }

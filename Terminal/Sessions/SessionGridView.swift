@@ -6,9 +6,10 @@ struct SessionGridView: View {
     @EnvironmentObject private var engine: SessionEngine
     @Environment(\.dismiss) private var dismiss
 
+    /// Grows to 3+ columns on wide screens, shrinks margins at any
+    /// Dynamic Type size.
     private let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12)
+        GridItem(.adaptive(minimum: 170), spacing: 12)
     ]
 
     var body: some View {
@@ -17,7 +18,7 @@ struct SessionGridView: View {
                 Color.terminalSurface.ignoresSafeArea()
 
                 if engine.sessions.isEmpty {
-                    EmptyState(symbol: "rectangle.stack")
+                    EmptyState(symbol: "rectangle.stack", text: String(localized: "No open sessions"))
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 12) {
@@ -45,7 +46,10 @@ struct SessionGridView: View {
                             .foregroundStyle(.secondary)
                             .padding(7)
                             .background(Color.primary.opacity(0.1), in: Circle())
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
+                    .accessibilityLabel("Close")
                 }
             }
         }
@@ -58,36 +62,48 @@ private struct SessionCardView: View {
     @EnvironmentObject private var engine: SessionEngine
     let onSelect: () -> Void
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                StatusDot(state: StatusDot.State(session.state))
-                Text(session.title)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 6)
-                Button {
-                    Haptics.tap()
-                    engine.closeSession(session)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .padding(5)
-                        .background(Color.primary.opacity(0.12), in: Circle())
-                }
-                .buttonStyle(.plain)
-            }
+    private var isActive: Bool {
+        engine.activeSessionID == session.id
+    }
 
-            Text(session.profile.endpoint)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    StatusDot(state: StatusDot.State(session.state))
+                    Text(session.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 6)
+                    Button {
+                        Haptics.tap()
+                        engine.closeSession(session)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .padding(5)
+                            .background(Color.primary.opacity(0.12), in: Circle())
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                            // 44pt hit area without growing the row.
+                            .padding(-12)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close")
+                }
+
+                Text(session.profile.endpoint)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .terminalGlass(cornerRadius: 16)
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .terminalGlass(cornerRadius: 16)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .onTapGesture(perform: onSelect)
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 }

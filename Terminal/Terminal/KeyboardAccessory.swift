@@ -11,27 +11,18 @@ final class ModifierState {
     func toggleCtrl() { ctrl.toggle(); alt = false; onChange() }
     func toggleAlt() { alt.toggle(); ctrl = false; onChange() }
 
-    /// Applies the held modifiers to typed bytes. One-shot: modifiers
-    /// reset after a single key, like a hardware chord.
-    func apply(to bytes: [UInt8]) -> [UInt8] {
-        if ctrl {
-            let out = bytes.map { $0 & 0x1f }
-            reset()
-            return out
-        }
-        if alt {
-            var out: [UInt8] = [0x1B]
-            out.append(contentsOf: bytes)
-            reset()
-            return out
-        }
-        return bytes
-    }
+    /// Typed-byte chords are applied by TerminalSession.sendUserInput —
+    /// it owns the semantic ASCII mapping.
 
     /// Escape-sequence variant for special keys (arrows etc.) that are
-    /// already CSI — Ctrl+arrow becomes CSI 1;5X.
+    /// already CSI — Ctrl+arrow → CSI 1;5X, Alt+arrow → CSI 1;3X.
     func arrow(_ code: String) -> [UInt8] {
-        let seq = ctrl ? "\u{1B}[1;5\(code)" : "\u{1B}[\(code)"
+        let seq: String
+        switch (ctrl, alt) {
+        case (true, _): seq = "\u{1B}[1;5\(code)"
+        case (_, true): seq = "\u{1B}[1;3\(code)"
+        default: seq = "\u{1B}[\(code)"
+        }
         reset()
         return [UInt8](seq.utf8)
     }
@@ -49,8 +40,11 @@ final class ModifierState {
 final class KeyboardAccessoryView: UIInputView {
 
     /// Injected by the session so sticky state survives bar rebuilds.
-    var modifiers = ModifierState()
+    private(set) var modifiers = ModifierState()
     var onSend: ([UInt8]) -> Void = { _ in }
+    /// Hide is wired by the owning coordinator so it resigns the actual
+    /// terminal view — a global responder search can hit the wrong tab.
+    var onHide: () -> Void = {}
 
     private var ctrlButton: KeyButton?
     private var altButton: KeyButton?
@@ -58,15 +52,23 @@ final class KeyboardAccessoryView: UIInputView {
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 46), inputViewStyle: .keyboard)
         accessibilityIdentifier = "keyboardAccessory"
-        modifiers.onChange = { [weak self] in self?.syncModifiers() }
+        bind(modifiers: modifiers)
         build()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Rebinds the shared modifier state — the callback must live on the
+    /// instance actually used, not a discarded default.
+    func bind(modifiers: ModifierState) {
+        self.modifiers = modifiers
+        modifiers.onChange = { [weak self] in self?.syncModifiers() }
+        syncModifiers()
+    }
+
     private func build() {
         backgroundColor = .clear
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
         blur.translatesAutoresizingMaskIntoConstraints = false
         addSubview(blur)
         NSLayoutConstraint.activate([
@@ -82,7 +84,6 @@ final class KeyboardAccessoryView: UIInputView {
         blur.contentView.addSubview(scroll)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: blur.contentView.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: blur.contentView.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: blur.contentView.topAnchor),
             scroll.bottomAnchor.constraint(equalTo: blur.contentView.bottomAnchor)
         ])
@@ -128,11 +129,24 @@ final class KeyboardAccessoryView: UIInputView {
         stack.addArrangedSubview(key("home", glyph: "arrowtriangle.left.fill") { [weak self] in self?.emitString("\u{1B}[H") })
         stack.addArrangedSubview(key("end", glyph: "arrowtriangle.right.fill") { [weak self] in self?.emitString("\u{1B}[F") })
 
-        stack.addArrangedSubview(sep())
-
-        stack.addArrangedSubview(key("hide", glyph: "keyboard.chevron.compact.down") {
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        })
+        // Hide lives in a fixed trailing zone — on iPhone the scrollable
+        // keys would otherwise push it off-screen.
+        let trailing = UIView()
+        trailing.translatesAutoresizingMaskIntoConstraints = false
+        blur.contentView.addSubview(trailing)
+        let hide = key("hide", glyph: "keyboard.chevron.compact.down") { [weak self] in
+            self?.onHide()
+        }
+        trailing.addSubview(hide)
+        NSLayoutConstraint.activate([
+            trailing.trailingAnchor.constraint(equalTo: blur.contentView.trailingAnchor),
+            trailing.topAnchor.constraint(equalTo: blur.contentView.topAnchor),
+            trailing.bottomAnchor.constraint(equalTo: blur.contentView.bottomAnchor),
+            trailing.widthAnchor.constraint(equalToConstant: 50),
+            scroll.trailingAnchor.constraint(equalTo: trailing.leadingAnchor),
+            hide.centerXAnchor.constraint(equalTo: trailing.centerXAnchor),
+            hide.centerYAnchor.constraint(equalTo: trailing.centerYAnchor)
+        ])
     }
 
     private func key(_ title: String, glyph: String? = nil, action: @escaping () -> Void) -> KeyButton {

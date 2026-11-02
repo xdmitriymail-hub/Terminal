@@ -20,7 +20,13 @@ struct TerminalApp: App {
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .background, .inactive:
+            case .background:
+                PrivacyOverlay.shared.update(visible: true, locked: appState.locked, appState: appState)
+                // Relock on every exit — not just the cold start. The
+                // Face ID sheet itself sends .inactive, so locking on
+                // .inactive would deadlock the unlock prompt.
+                appState.lock()
+            case .inactive:
                 PrivacyOverlay.shared.update(visible: true, locked: appState.locked, appState: appState)
             case .active:
                 if appState.locked {
@@ -32,6 +38,10 @@ struct TerminalApp: App {
             @unknown default:
                 break
             }
+        }
+        .onChange(of: appState.settings.settings.requireBiometry) { _, on in
+            // Toggling the setting applies the policy immediately.
+            if on { appState.lock() }
         }
         .onChange(of: appState.locked) { _, locked in
             guard scenePhase == .active else { return }

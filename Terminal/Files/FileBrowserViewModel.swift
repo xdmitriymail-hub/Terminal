@@ -22,15 +22,33 @@ final class FileBrowserViewModel: ObservableObject {
 
     private let engine: SessionEngine
     private var sftp: SFTPService?
-    private var serviceInFlight: Task<SFTPService, Error>?
+    /// Which warm-cache key `sftp` was leased under — needed to disarm
+    /// its idle eviction when the view reappears.
+    private var serviceKey: ObjectIdentifier?
+    private var serviceInFlight: Task<(SFTPService, ObjectIdentifier), Error>?
     private var home: String?
     /// Bumped on every navigation/load so a stale response can never
     /// overwrite a newer folder's listing.
     private var generation = 0
 
-    /// SFTP channels kept warm per profile so transfers keep running
-    /// after the browser is dismissed and re-opening is instant.
-    private static var warmServices: [UUID: SFTPService] = [:]
+    /// SFTP channels kept warm so transfers keep running after the
+    /// browser is dismissed and re-opening is instant.
+    ///
+    /// Keyed by the SSHConnection's OBJECT IDENTITY, not the profile:
+    /// a pooled reconnect produces a new connection object, so a stale
+    /// channel bound to a dead transport can never be handed out after
+    /// `invalidateConnection` swaps the pool entry.
+    private final class WarmRef {
+        let service: SFTPService
+        var idleTask: Task<Void, Never>?
+        init(service: SFTPService) { self.service = service }
+    }
+    private static var warm: [ObjectIdentifier: WarmRef] = [:]
+    /// profile → cache keys in use — lets `evictWarm(profileID:)` find
+    /// entries without knowing the connection objects.
+    private static var warmKeysByProfile: [UUID: Set<ObjectIdentifier>] = [:]
+    /// How long a service with no live users stays warm before close.
+    private static let warmIdle: Duration = .seconds(120)
 
     init(profile: ServerProfile, engine: SessionEngine) {
         self.profile = profile
@@ -69,21 +87,49 @@ final class FileBrowserViewModel: ObservableObject {
 
     /// Lazily opens (or reuses) the SFTP channel for this profile.
     /// Concurrent callers share one in-flight open task — no duplicate
-    /// channels from parallel callers.
+    /// channels from parallel callers. The channel is keyed to the
+    /// connection OBJECT: a reconnected transport always yields a new
+    /// object identity and therefore a fresh channel.
     func service() async throws -> SFTPService {
-        if let sftp { return sftp }
-        if let task = serviceInFlight { return try await task.value }
-        let task = Task<SFTPService, Error> { [profile, engine] in
-            if let warm = Self.warmServices[profile.id] { return warm }
+        if let sftp {
+            if sftp.isChannelAlive { return sftp }
+            // Our own channel died — invalidate before reopening so the
+            // lease books stay balanced.
+            evict()
+        }
+        if let task = serviceInFlight { return try await task.value.0 }
+        let task = Task<(SFTPService, ObjectIdentifier), Error> { [profile, engine] in
             let connection = engine.connection(for: profile)
+            let key = ObjectIdentifier(connection)
+            if let cached = Self.warm[key] {
+                if cached.service.isChannelAlive {
+                    // Still ours and still alive — disarm idle eviction.
+                    cached.idleTask?.cancel()
+                    cached.idleTask = nil
+                    return (cached.service, key)
+                }
+                // Channel died underneath: never hand out a corpse.
+                cached.idleTask?.cancel()
+                Self.warm[key] = nil
+                Self.warmKeysByProfile[profile.id]?.remove(key)
+                cached.service.invalidate()
+            }
             let fresh = SFTPService(sftp: try await connection.openSFTP())
-            Self.warmServices[profile.id] = fresh
-            return fresh
+            let ref = WarmRef(service: fresh)
+            Self.warm[key] = ref
+            Self.warmKeysByProfile[profile.id, default: []].insert(key)
+            Self.armIdleEviction(key: key, ref: ref, profileID: profile.id)
+            return (fresh, key)
         }
         serviceInFlight = task
         defer { serviceInFlight = nil }
-        let svc = try await task.value
-        sftp = svc
+        let (svc, key) = try await task.value
+        if sftp !== svc {
+            sftp?.removeLease()
+            svc.addLease()
+            sftp = svc
+            serviceKey = key
+        }
         return svc
     }
 
@@ -104,16 +150,47 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     /// Drops the view's hold on the channel without closing it — it
-    /// stays warm so transfers finish and reopening is instant.
+    /// stays warm so transfers finish and reopening is instant. The
+    /// idle timer is re-armed now that this view's lease is gone.
     func park() {
+        sftp?.removeLease()
+        if let key = serviceKey, let ref = Self.warm[key] {
+            Self.armIdleEviction(key: key, ref: ref, profileID: profile.id)
+        }
         sftp = nil
+        serviceKey = nil
     }
 
     /// Called when a profile is edited or deleted — its warm channel may
-    /// point at the old host, so it must not be reused.
+    /// point at the old host, so it must not be reused. Invalidation
+    /// still respects live leases: an in-flight transfer finishes on
+    /// the doomed channel, then it's closed.
     static func evictWarm(profileID: UUID) {
-        guard let service = warmServices.removeValue(forKey: profileID) else { return }
-        Task { await service.close() }
+        guard let keys = warmKeysByProfile.removeValue(forKey: profileID) else { return }
+        for key in keys {
+            guard let ref = warm.removeValue(forKey: key) else { continue }
+            ref.idleTask?.cancel()
+            ref.service.invalidate()
+        }
+    }
+
+    /// Close a warm service once nobody uses it for `warmIdle`. While
+    /// leases exist the check re-arms — only genuinely idle channels
+    /// are torn down.
+    private static func armIdleEviction(key: ObjectIdentifier, ref: WarmRef, profileID: UUID) {
+        ref.idleTask?.cancel()
+        ref.idleTask = Task { [service = ref.service] in
+            while true {
+                try? await Task.sleep(for: warmIdle)
+                if Task.isCancelled { return }
+                guard Self.warm[key] === ref else { return }
+                if service.hasLeases { continue }
+                Self.warm[key] = nil
+                Self.warmKeysByProfile[profileID]?.remove(key)
+                service.invalidate()
+                return
+            }
+        }
     }
 
     // MARK: - Loading
@@ -309,18 +386,21 @@ final class FileBrowserViewModel: ObservableObject {
         Haptics.failed()
     }
 
-    /// Drop a suspect channel: forget it everywhere and close it, so the
-    /// next service() call opens a fresh one on the pooled transport.
-    /// A channel with live transfers on it isn't closed — an in-flight
-    /// upload/download matters more than a flaky listing.
+    /// Drop a suspect channel: remove it from the warm cache (so it can
+    /// never be handed out again) and invalidate it. Invalidation closes
+    /// immediately only when nothing holds a lease — a live transfer on
+    /// the channel keeps it until it drains, then it's closed. The next
+    /// service() call opens a fresh channel on the pooled transport.
     private func evict() {
         guard let sftp else { return }
-        if TransferManager.shared.activeCount == 0 {
-            if Self.warmServices[profile.id] === sftp {
-                Self.warmServices[profile.id] = nil
-            }
-            Task { await sftp.close() }
+        if let key = serviceKey, let ref = Self.warm[key], ref.service === sftp {
+            ref.idleTask?.cancel()
+            Self.warm[key] = nil
+            Self.warmKeysByProfile[profile.id]?.remove(key)
         }
+        sftp.removeLease()
+        sftp.invalidate()
         self.sftp = nil
+        serviceKey = nil
     }
 }
