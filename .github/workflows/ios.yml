@@ -35,6 +35,19 @@ jobs:
           path: ~/Library/Developer/Xcode/DerivedData/Terminal-*/SourcePackages
           key: spm-${{ hashFiles('project.yml') }}-${{ runner.os }}
 
+      - name: Resolve + patch SwiftTerm
+        run: |
+          xcodebuild \
+            -project Terminal.xcodeproj \
+            -scheme Terminal \
+            -destination 'generic/platform=iOS' \
+            -skipPackagePluginValidation \
+            -resolvePackageDependencies
+          FILE=$(find ~/Library/Developer/Xcode/DerivedData -path '*SwiftTerm*/PowerlineRenderer.swift' | head -1)
+          [ -n "$FILE" ] || { echo "PowerlineRenderer.swift not found"; exit 1; }
+          sed -i '' 's/flameLowerPath\.dropFirst()/Array(flameLowerPath.dropFirst())/' "$FILE"
+          grep -n 'Array(flameLowerPath.dropFirst())' "$FILE"
+
       - name: Archive (unsigned)
         run: |
           xcodebuild \
