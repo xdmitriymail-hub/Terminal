@@ -48,7 +48,8 @@ final class ModifierState {
 /// Material adapts to light/dark; flush with the keyboard — no gaps.
 final class KeyboardAccessoryView: UIInputView {
 
-    let modifiers = ModifierState()
+    /// Injected by the session so sticky state survives bar rebuilds.
+    var modifiers = ModifierState()
     var onSend: ([UInt8]) -> Void = { _ in }
 
     private var ctrlButton: KeyButton?

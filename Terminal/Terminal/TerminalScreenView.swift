@@ -17,6 +17,7 @@ struct TerminalScreenView: View {
         self.externalAccessory = accessory
         if accessory == nil {
             let bar = KeyboardAccessoryView()
+            bar.modifiers = session.modifiers
             bar.onSend = { [weak session] bytes in
                 session?.send(ArraySlice(bytes))
             }
@@ -44,7 +45,7 @@ struct TerminalScreenView: View {
                 fontSize: settings.settings.fontSize,
                 theme: activeTheme,
                 accessory: accessory,
-                modifiers: bar?.modifiers
+                modifiers: session.modifiers
             )
             .ignoresSafeArea(.container, edges: .bottom)
             .accessibilityIdentifier("terminalSurface")
@@ -67,7 +68,7 @@ struct TerminalScreenView: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 HStack(spacing: 8) {
-                    StatusDot(state: dotState)
+                    StatusDot(state: StatusDot.State(session.state))
                     Text(session.title)
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)
@@ -111,7 +112,7 @@ struct TerminalScreenView: View {
                     .lineLimit(1)
                 stripButton("arrow.clockwise") {
                     Haptics.tap()
-                    Task { await session.reconnect() }
+                    session.reconnect()
                 }
                 stripButton("xmark") {
                     Haptics.tap()
@@ -142,13 +143,4 @@ struct TerminalScreenView: View {
         .buttonStyle(.plain)
     }
 
-    private var dotState: StatusDot.State {
-        switch session.state {
-        case .connecting: return .connecting
-        case .online: return .online
-        case .reconnecting: return .reconnecting
-        case .offline: return .offline
-        case .failed: return .failed
-        }
-    }
 }

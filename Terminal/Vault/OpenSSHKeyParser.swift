@@ -1,4 +1,6 @@
 import Foundation
+import Crypto
+import CryptoKit
 
 enum SSHKeyImportError: Error, Equatable {
     case invalidFormat
@@ -111,20 +113,30 @@ enum OpenSSHKeyParser {
         let parsed: Parsed
         switch keyType {
         case "ssh-ed25519":
-            _ = try priv.readString() // public key bytes
+            let embeddedPub = try priv.readString()
             let privateBlob = try priv.readString()
             guard privateBlob.count == 64 else { throw SSHKeyImportError.corrupt }
-            let seed = privateBlob.prefix(32)
+            let seed = Data(privateBlob.prefix(32))
+            // The blob's embedded public, its private tail and the
+            // outer public section must all derive from the same seed —
+            // a mismatched keypair would silently fail server-side.
+            let blobPub = (try? blobCheck.readString()) ?? Data()
+            let derivedPub = try Crypto.Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+                .publicKey.rawRepresentation
+            guard embeddedPub == blobPub,
+                  privateBlob.suffix(32) == derivedPub else {
+                throw SSHKeyImportError.corrupt
+            }
             parsed = Parsed(
                 type: .ed25519,
-                privateMaterial: Data(seed),
+                privateMaterial: seed,
                 publicKeyLine: publicLine(type: keyType, blob: publicBlob),
                 comment: (try? priv.readText()) ?? ""
             )
 
         case "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521":
             let curve = try priv.readText()
-            _ = try priv.readString() // public point
+            let embeddedPoint = try priv.readString()
             var scalar = try priv.readString()
             // strip mpint sign-padding byte
             while scalar.count > 1 && scalar.first == 0 {
@@ -143,6 +155,15 @@ enum OpenSSHKeyParser {
                 scalar = Data(repeating: 0, count: curveBytes - scalar.count) + scalar
             }
             guard scalar.count == curveBytes else { throw SSHKeyImportError.corrupt }
+            // The scalar's derived point must match both the embedded
+            // point and the outer blob's — catches corrupt pairings.
+            let blobCurve = (try? blobCheck.readText()) ?? ""
+            let blobPoint = (try? blobCheck.readString()) ?? Data()
+            guard blobCurve == curve,
+                  embeddedPoint == blobPoint,
+                  (try? derivePoint(type: type, scalar: scalar)) == embeddedPoint else {
+                throw SSHKeyImportError.corrupt
+            }
             parsed = Parsed(
                 type: type,
                 privateMaterial: scalar,
@@ -153,7 +174,27 @@ enum OpenSSHKeyParser {
         default:
             throw SSHKeyImportError.unsupportedKeyType(keyType)
         }
+
+        // The private section ends with deterministic padding 1,2,3,… —
+        // anything else means truncation or trailing garbage.
+        var expected: UInt8 = 1
+        while priv.remaining > 0 {
+            guard (try? priv.readBytes(1))?.first == expected else {
+                throw SSHKeyImportError.corrupt
+            }
+            expected &+= 1
+        }
         return parsed
+    }
+
+    /// Derives the public point from an ecdsa scalar for consistency checks.
+    private static func derivePoint(type: StoredSSHKey.KeyType, scalar: Data) throws -> Data {
+        switch type {
+        case .p256: return try CryptoKit.P256.Signing.PrivateKey(rawRepresentation: scalar).publicKey.x963Representation
+        case .p384: return try CryptoKit.P384.Signing.PrivateKey(rawRepresentation: scalar).publicKey.x963Representation
+        case .p521: return try CryptoKit.P521.Signing.PrivateKey(rawRepresentation: scalar).publicKey.x963Representation
+        default: throw SSHKeyImportError.unsupportedKeyType("")
+        }
     }
 
     static func isEncrypted(_ pem: String) -> Bool {

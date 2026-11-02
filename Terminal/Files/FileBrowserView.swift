@@ -27,6 +27,15 @@ private struct FileBrowserContent: View {
     @State private var newFolderName = ""
     @State private var showImporter = false
     @State private var showTransfers = false
+    @State private var overwritePrompt: PendingUpload?
+
+    private struct PendingUpload: Identifiable {
+        let id = UUID()
+        let local: URL
+        let remotePath: String
+        let svc: SFTPService
+        var name: String { local.lastPathComponent }
+    }
 
     init(profile: ServerProfile, engine: SessionEngine) {
         _vm = StateObject(wrappedValue: FileBrowserViewModel(profile: profile, engine: engine))
@@ -71,6 +80,15 @@ private struct FileBrowserContent: View {
             }
             .alert(vm.error ?? "", isPresented: errorAlertPresented) {
                 Button("OK") { vm.error = nil }
+            }
+            .confirmationDialog(
+                "“\(overwritePrompt?.name ?? "")” already exists",
+                isPresented: overwritePresented,
+                titleVisibility: .visible
+            ) {
+                Button("Replace", role: .destructive) { commitUpload(overwritePrompt, replace: true) }
+                Button("Keep Both") { commitUpload(overwritePrompt, replace: false) }
+                Button("Cancel", role: .cancel) { overwritePrompt = nil }
             }
     }
 
@@ -322,7 +340,18 @@ private struct FileBrowserContent: View {
     // MARK: - Actions
 
     private func tap(_ file: RemoteFile) {
-        if file.isDirectory {
+        if file.isSymlink {
+            // Listings flag links, not targets — stat() decides.
+            Haptics.tap()
+            Task {
+                guard let resolved = await vm.resolve(file) else { return }
+                if resolved.isDirectory {
+                    await vm.navigate(resolved)
+                } else {
+                    preview = resolved
+                }
+            }
+        } else if file.isDirectory {
             Haptics.select()
             Task { await vm.navigate(file) }
         } else {
@@ -351,15 +380,47 @@ private struct FileBrowserContent: View {
                 Haptics.failed()
                 return
             }
-            TransferManager.shared.upload(
-                local: url,
-                to: vm.remotePath(for: url.lastPathComponent),
-                via: svc
-            )
-            // Let the picker finish dismissing before showing the queue.
-            try? await Task.sleep(for: .milliseconds(300))
-            showTransfers = true
+            let remote = vm.remotePath(for: url.lastPathComponent)
+            if await svc.exists(path: remote) {
+                overwritePrompt = PendingUpload(local: url, remotePath: remote, svc: svc)
+                return
+            }
+            await startUpload(local: url, remotePath: remote, svc: svc)
         }
+    }
+
+    private func commitUpload(_ pending: PendingUpload?, replace: Bool) {
+        overwritePrompt = nil
+        guard let pending else { return }
+        Task {
+            var remote = pending.remotePath
+            if !replace {
+                remote = await uniqueRemotePath(pending.remotePath, svc: pending.svc)
+            }
+            await startUpload(local: pending.local, remotePath: remote, svc: pending.svc)
+        }
+    }
+
+    /// "name.txt" → "name 2.txt", "name 3.txt"… checked on the server.
+    private func uniqueRemotePath(_ path: String, svc: SFTPService) async -> String {
+        let dir = (path as NSString).deletingLastPathComponent
+        let ext = (path as NSString).pathExtension
+        let base = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        var n = 2
+        var candidate = path
+        while await svc.exists(path: candidate) {
+            let name = ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"
+            candidate = (dir as NSString).appendingPathComponent(name)
+            n += 1
+        }
+        return candidate
+    }
+
+    private func startUpload(local: URL, remotePath: String, svc: SFTPService) async {
+        TransferManager.shared.upload(local: local, to: remotePath, via: svc)
+        // Let the picker finish dismissing before showing the queue.
+        try? await Task.sleep(for: .milliseconds(300))
+        showTransfers = true
     }
 
     // MARK: - Helpers
@@ -457,6 +518,13 @@ private struct FileBrowserContent: View {
         Binding(
             get: { vm.error != nil && !vm.files.isEmpty },
             set: { if !$0 { vm.error = nil } }
+        )
+    }
+
+    private var overwritePresented: Binding<Bool> {
+        Binding(
+            get: { overwritePrompt != nil },
+            set: { if !$0 { overwritePrompt = nil } }
         )
     }
 }

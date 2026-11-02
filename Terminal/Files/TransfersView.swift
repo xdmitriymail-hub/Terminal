@@ -17,11 +17,24 @@ struct TransfersView: View {
                             .listRowBackground(Color.clear)
                             .listRowSeparatorTint(Color.primary.opacity(0.08))
                             .swipeActions(edge: .trailing) {
-                                if transfer.state != .running {
+                                if transfer.state == .running {
+                                    Button(role: .destructive) {
+                                        manager.cancel(transfer.id)
+                                    } label: {
+                                        Label("Cancel", systemImage: "stop.circle")
+                                    }
+                                } else {
                                     Button(role: .destructive) {
                                         manager.remove(transfer.id)
                                     } label: {
                                         Label("Remove", systemImage: "xmark")
+                                    }
+                                    if !transfer.isUpload, transfer.localURL != nil {
+                                        Button(role: .destructive) {
+                                            manager.removeAndDeleteFile(transfer.id)
+                                        } label: {
+                                            Label("Delete File", systemImage: "trash")
+                                        }
                                     }
                                 }
                             }
@@ -73,6 +86,10 @@ struct TransfersView: View {
                     Text("Couldn't finish")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                case .cancelled:
+                    Text("Cancelled")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -85,6 +102,9 @@ struct TransfersView: View {
             case .failed:
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundStyle(.red.opacity(0.75))
+            case .cancelled:
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
             case .running:
                 EmptyView()
             }

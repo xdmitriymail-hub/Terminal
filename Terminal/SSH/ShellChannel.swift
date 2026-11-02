@@ -5,9 +5,9 @@ import NIOSSH
 
 /// One interactive PTY channel: terminal output as an async stream,
 /// typed input via `send`, resize via `setSize`.
-final class ShellChannel: @unchecked Sendable {
+actor ShellChannel {
 
-    enum Event {
+    enum Event: Sendable {
         case output(Data)
         case closed(Error?)
     }
@@ -19,7 +19,9 @@ final class ShellChannel: @unchecked Sendable {
     private var lastCols = 0
     private var lastRows = 0
 
-    let output: AsyncThrowingStream<Event, Error>
+    /// Output ordering is preserved end-to-end; the stream is deliberately
+    /// unbounded — dropping terminal bytes would corrupt the rendering.
+    nonisolated let output: AsyncThrowingStream<Event, Error>
 
     init() {
         var cont: AsyncThrowingStream<Event, Error>.Continuation!
@@ -43,22 +45,26 @@ final class ShellChannel: @unchecked Sendable {
         task = Task { [weak self] in
             do {
                 try await client.withPTY(request) { inbound, outbound in
-                    self?.attach(writer: outbound)
+                    await self?.attach(writer: outbound)
                     for try await item in inbound {
-                        guard let self else { return }
                         switch item {
                         case .stdout(let buffer), .stderr(let buffer):
-                            self.continuation.yield(.output(Data(buffer.readableBytesView)))
+                            await self?.emit(Data(buffer.readableBytesView))
                         }
+                        if Task.isCancelled { return }
                     }
                 }
-                self?.finish(nil)
+                await self?.finish(nil)
             } catch {
-                self?.fail(error)
+                await self?.fail(error)
             }
         }
 
         try await waitReady()
+    }
+
+    private func emit(_ data: Data) {
+        continuation.yield(.output(data))
     }
 
     private func attach(writer: Citadel.TTYStdinWriter) {
@@ -94,46 +100,28 @@ final class ShellChannel: @unchecked Sendable {
         }
     }
 
-    /// Chained write queue — independent fire-and-forget Tasks can be
-    /// scheduled out of order, reordering typed input on the wire.
-    private var sendChain: Task<Void, Never>?
-
-    func send(_ bytes: [UInt8]) {
+    /// Writes serialize on the actor — callers order bursts through their
+    /// own send chain; consecutive writes keep wire order.
+    func send(_ bytes: [UInt8]) async {
         guard let writer else { return }
-        let previous = sendChain
-        sendChain = Task {
-            _ = await previous?.value
-            try? await writer.write(ByteBuffer(bytes: bytes))
-        }
+        try? await writer.write(ByteBuffer(bytes: bytes))
     }
 
-    func send(_ string: String) {
-        send([UInt8](string.utf8))
+    func send(_ string: String) async {
+        await send([UInt8](string.utf8))
     }
 
-    func setSize(cols: Int, rows: Int) {
+    func setSize(cols: Int, rows: Int) async {
         guard cols > 0, rows > 0 else { return }
         lastCols = cols
         lastRows = rows
         guard let writer else { return }
-        Task {
-            try? await writer.changeSize(cols: cols, rows: rows, pixelWidth: 0, pixelHeight: 0)
-        }
+        try? await writer.changeSize(cols: cols, rows: rows, pixelWidth: 0, pixelHeight: 0)
     }
 
     func close() {
         task?.cancel()
         task = nil
         finish(nil)
-    }
-
-    /// SSH-level keepalive: re-sends the current window size — a harmless
-    /// no-op for the remote shell that keeps NAT state warm.
-    func keepAlive() {
-        guard lastCols > 0, lastRows > 0, let writer else { return }
-        let (cols, rows) = (lastCols, lastRows)
-        Task {
-            try? await writer.changeSize(cols: cols, rows: rows, pixelWidth: 0, pixelHeight: 0)
-        }
     }
 }

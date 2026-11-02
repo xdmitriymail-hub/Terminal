@@ -193,10 +193,46 @@ final class PortForwardService: ObservableObject {
 }
 
 /// Minimal SOCKS5 server-side handshake (no-auth, CONNECT only).
-private enum Socks5 {
-    struct Request {
+enum Socks5 {
+    struct Request: Equatable {
         let host: String
         let port: Int
+    }
+
+    /// Pure parse of "address + big-endian port" by ATYP byte — shared
+    /// by the buffered reader and unit tests. `payload` is the bytes
+    /// after ATYP (for domains it includes the leading length byte).
+    static func parseRequest(atyp: UInt8, payload: Data) -> Request? {
+        switch atyp {
+        case 0x01: // IPv4
+            guard payload.count == 6 else { return nil }
+            let host = payload.prefix(4).map(String.init).joined(separator: ".")
+            return make(host: host, portBytes: payload.suffix(2))
+        case 0x03: // domain
+            guard payload.count >= 2 else { return nil }
+            let len = Int(payload[0])
+            guard len > 0, payload.count == len + 3 else { return nil }
+            let host = String(data: payload.dropFirst().prefix(len), encoding: .utf8) ?? ""
+            return make(host: host, portBytes: payload.suffix(2))
+        case 0x04: // IPv6
+            guard payload.count == 18 else { return nil }
+            var addr = in6_addr()
+            _ = withUnsafeMutableBytes(of: &addr) { ptr in
+                ptr.copyBytes(from: payload.prefix(16))
+            }
+            var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            var copy = addr
+            let host = inet_ntop(AF_INET6, &copy, &buf, socklen_t(INET6_ADDRSTRLEN)).map { String(cString: $0) } ?? ""
+            return make(host: host, portBytes: payload.suffix(2))
+        default:
+            return nil
+        }
+    }
+
+    private static func make(host: String, portBytes: Data.SubSequence) -> Request? {
+        let p = Data(portBytes)
+        guard !host.isEmpty, p.count == 2 else { return nil }
+        return Request(host: host, port: Int(p[0]) << 8 | Int(p[1]))
     }
 
     /// Buffered reader: a single NW receive can return greeting + request
@@ -239,36 +275,22 @@ private enum Socks5 {
         let header = try await reader.read(4)
         guard header[0] == 0x05, header[1] == 0x01 else { return nil }
 
-        var host: String
-        var portBytes: Data
+        let request: Request?
         switch header[3] {
         case 0x01: // IPv4
-            let rest = try await reader.read(6)
-            host = rest.prefix(4).map(String.init).joined(separator: ".")
-            portBytes = rest.suffix(2)
+            request = Self.parseRequest(atyp: 0x01, payload: try await reader.read(6))
         case 0x03: // domain
             let len = Int(try await reader.read(1)[0])
             guard len > 0 else { return nil }
-            let rest = try await reader.read(len + 2)
-            host = String(data: rest.prefix(len), encoding: .utf8) ?? ""
-            portBytes = rest.suffix(2)
+            var payload = Data([UInt8(len)])
+            payload.append(try await reader.read(len + 2))
+            request = Self.parseRequest(atyp: 0x03, payload: payload)
         case 0x04: // IPv6
-            let rest = try await reader.read(18)
-            var addr = in6_addr()
-            _ = withUnsafeMutableBytes(of: &addr) { ptr in
-                ptr.copyBytes(from: rest.prefix(16))
-            }
-            var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-            var copy = addr
-            host = inet_ntop(AF_INET6, &copy, &buf, socklen_t(INET6_ADDRSTRLEN)).map { String(cString: $0) } ?? ""
-            portBytes = rest.suffix(2)
+            request = Self.parseRequest(atyp: 0x04, payload: try await reader.read(18))
         default:
             return nil
         }
-
-        guard !host.isEmpty, portBytes.count == 2 else { return nil }
-        let port = Int(portBytes[0]) << 8 | Int(portBytes[1])
-        return Request(host: host, port: port)
+        return request
     }
 
     static func sendSuccess(on nw: NWConnection) async throws {

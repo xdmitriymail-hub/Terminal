@@ -22,7 +22,11 @@ final class FileBrowserViewModel: ObservableObject {
 
     private let engine: SessionEngine
     private var sftp: SFTPService?
+    private var serviceInFlight: Task<SFTPService, Error>?
     private var home: String?
+    /// Bumped on every navigation/load so a stale response can never
+    /// overwrite a newer folder's listing.
+    private var generation = 0
 
     /// SFTP channels kept warm per profile so transfers keep running
     /// after the browser is dismissed and re-opening is instant.
@@ -64,17 +68,39 @@ final class FileBrowserViewModel: ObservableObject {
     // MARK: - Connection
 
     /// Lazily opens (or reuses) the SFTP channel for this profile.
+    /// Concurrent callers share one in-flight open task — no duplicate
+    /// channels from parallel callers.
     func service() async throws -> SFTPService {
         if let sftp { return sftp }
-        if let warm = Self.warmServices[profile.id] {
-            sftp = warm
-            return warm
+        if let task = serviceInFlight { return try await task.value }
+        let task = Task<SFTPService, Error> { [profile, engine] in
+            if let warm = Self.warmServices[profile.id] { return warm }
+            let connection = engine.connection(for: profile)
+            let fresh = SFTPService(sftp: try await connection.openSFTP())
+            Self.warmServices[profile.id] = fresh
+            return fresh
         }
-        let connection = engine.connection(for: profile)
-        let fresh = SFTPService(sftp: try await connection.openSFTP())
-        Self.warmServices[profile.id] = fresh
-        sftp = fresh
-        return fresh
+        serviceInFlight = task
+        defer { serviceInFlight = nil }
+        let svc = try await task.value
+        sftp = svc
+        return svc
+    }
+
+    /// stat() through the channel — resolves what a symlink actually is.
+    func resolve(_ file: RemoteFile) async -> RemoteFile? {
+        guard file.isSymlink else { return file }
+        do {
+            let attrs = try await service().stat(path: file.path)
+            let perms = attrs.permissions ?? 0
+            var resolved = file
+            if perms & 0o170000 == 0o040000 {
+                resolved.isDirectory = true
+            }
+            return resolved
+        } catch {
+            return file
+        }
     }
 
     /// Drops the view's hold on the channel without closing it — it
@@ -120,28 +146,37 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func load() async {
+        generation += 1
+        let gen = generation
         isLoading = true
         defer { isLoading = false }
         do {
-            files = try await attemptList()
+            let list = try await attemptList()
+            guard gen == generation else { return }
+            files = list
             error = nil
         } catch {
             // Channel may be stale — drop it and retry once on a fresh one.
             evict()
             do {
-                files = try await attemptList()
+                let list = try await attemptList()
+                guard gen == generation else { return }
+                files = list
                 self.error = nil
                 return
             } catch {}
             // Folder may be gone — fall back to home before giving up.
             if let home, home != path {
-                path = home
                 do {
-                    files = try await attemptList()
+                    let list = try await attemptList()
+                    guard gen == generation else { return }
+                    path = home
+                    files = list
                     self.error = nil
                     return
                 } catch {}
             }
+            guard gen == generation else { return }
             fail("Couldn't load folder")
         }
     }
@@ -173,26 +208,29 @@ final class FileBrowserViewModel: ObservableObject {
     /// Path only commits after the listing succeeds — a failed jump
     /// never strands the view in a folder it can't show.
     private func go(to newPath: String) async {
-        guard !isLoading else { return }
+        generation += 1
+        let gen = generation
         isLoading = true
         defer { isLoading = false }
         do {
             let svc = try await service()
             let list = sort(try await svc.list(path: newPath))
-            commit(newPath, list)
+            commit(gen, newPath, list)
         } catch {
             evict()
             do {
                 let svc = try await service()
                 let list = sort(try await svc.list(path: newPath))
-                commit(newPath, list)
+                commit(gen, newPath, list)
             } catch {
+                guard gen == generation else { return }
                 fail("Couldn't open folder")
             }
         }
     }
 
-    private func commit(_ newPath: String, _ list: [RemoteFile]) {
+    private func commit(_ gen: Int, _ newPath: String, _ list: [RemoteFile]) {
+        guard gen == generation else { return }
         withAnimation(.easeInOut(duration: 0.2)) {
             path = newPath
             files = list
@@ -273,12 +311,16 @@ final class FileBrowserViewModel: ObservableObject {
 
     /// Drop a suspect channel: forget it everywhere and close it, so the
     /// next service() call opens a fresh one on the pooled transport.
+    /// A channel with live transfers on it isn't closed — an in-flight
+    /// upload/download matters more than a flaky listing.
     private func evict() {
         guard let sftp else { return }
-        if Self.warmServices[profile.id] === sftp {
-            Self.warmServices[profile.id] = nil
+        if TransferManager.shared.activeCount == 0 {
+            if Self.warmServices[profile.id] === sftp {
+                Self.warmServices[profile.id] = nil
+            }
+            Task { await sftp.close() }
         }
         self.sftp = nil
-        Task { await sftp.close() }
     }
 }

@@ -14,6 +14,7 @@ struct HostsListView: View {
     @State private var showSettings = false
     @State private var editing: ServerProfile?
     @State private var session: TerminalSession?
+    @State private var errorMessage: String?
 
     var body: some View {
         if embeddedInStack {
@@ -58,6 +59,9 @@ struct HostsListView: View {
         .sheet(isPresented: $showAdd) { AddServerView() }
         .sheet(item: $editing) { AddServerView(profile: $0) }
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .alert(errorMessage ?? "", isPresented: errorPresented) {
+            Button("OK") { errorMessage = nil }
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 18) {
@@ -84,6 +88,13 @@ struct HostsListView: View {
         Binding(
             get: { session?.id },
             set: { if $0 == nil { session = nil } }
+        )
+    }
+
+    private var errorPresented: Binding<Bool> {
+        Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
         )
     }
 
@@ -196,8 +207,9 @@ struct HostsListView: View {
         copy.id = UUID()
         copy.lastConnected = nil
         if !copy.name.isEmpty { copy.name += " copy" }
-        if let password = Keychain.loadString(tag: "password.\(profile.id.uuidString)") {
-            Keychain.save(password, tag: "password.\(copy.id.uuidString)")
+        if let password = Keychain.loadString(tag: "password.\(profile.id.uuidString)"),
+           Keychain.save(password, tag: "password.\(copy.id.uuidString)") != errSecSuccess {
+            errorMessage = "Couldn't copy the password — the new server will ask for it"
         }
         profiles.save(copy)
         Haptics.tap()

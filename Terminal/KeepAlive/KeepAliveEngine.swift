@@ -12,6 +12,14 @@ final class KeepAliveEngine: ObservableObject {
     private let engine = AVAudioEngine()
     private var player: AVAudioPlayerNode?
     private var enabled = false
+    /// The silent stream is justified only while live sessions exist —
+    /// with zero sessions it burns battery for nothing.
+    private var hasSessions = false
+
+    func setHasSessions(_ value: Bool) {
+        hasSessions = value
+        if enabled, value { start() } else if !value { stop() }
+    }
 
     init() {
         let center = NotificationCenter.default
@@ -33,11 +41,11 @@ final class KeepAliveEngine: ObservableObject {
 
     func setEnabled(_ on: Bool) {
         enabled = on
-        if on { start() } else { stop() }
+        if on, hasSessions { start() } else { stop() }
     }
 
     private func start() {
-        guard !isRunning else { return }
+        guard !isRunning, hasSessions else { return }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, options: [.mixWithOthers])

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import ImageIO
 
 /// In-place file preview: text opens in the code editor, images get
 /// pinch-to-zoom, anything else offers the system share sheet.
@@ -28,6 +29,10 @@ struct FilePreviewView: View {
     /// Largest file we hold in memory for preview — bigger files go
     /// straight to the share flow and download on demand instead.
     private let byteCap = 6_000_000
+
+    /// Largest text the editor takes — bigger files stay read-only
+    /// through the share path instead of choking the editor.
+    private let editorCap = 1_500_000
 
     private struct ShareItem: Identifiable {
         let id = UUID()
@@ -66,7 +71,14 @@ struct FilePreviewView: View {
             .alert("Couldn't share", isPresented: $shareFailed) {
                 Button("OK") {}
             }
-            .sheet(item: $shareItem) { ShareSheet(items: [$0.url]) }
+            .sheet(item: $shareItem, onDismiss: { shareItem = nil }) { item in
+                ShareSheet(items: [item.url]) {
+                    // Temp copy served its purpose once the sheet is gone.
+                    try? FileManager.default.removeItem(
+                        at: item.url.deletingLastPathComponent()
+                    )
+                }
+            }
         }
         .task { await load() }
     }
@@ -170,21 +182,21 @@ struct FilePreviewView: View {
                 return
             }
             let svc = try await vm.service()
-            let raw = try await svc.readFile(path: file.path, maxBytes: byteCap)
-            // Never edit a possibly truncated file — a save would
-            // silently cut it on the server.
-            let truncated = raw.count >= byteCap && (file.size ?? UInt64(byteCap + 1)) > UInt64(raw.count)
-            if truncated {
-                data = raw
+            let (raw, complete) = try await svc.readFile(path: file.path, maxBytes: byteCap)
+            // Never edit or share a possibly truncated file — saving
+            // would silently cut it on the server, sharing would ship
+            // a broken copy. `data` stays nil so share() downloads it
+            // in full instead.
+            guard complete else {
                 content = .binary
                 phase = .ready
                 return
             }
-            if let decoded = String(data: raw, encoding: .utf8) {
+            if raw.count <= editorCap, let decoded = String(data: raw, encoding: .utf8) {
                 text = decoded
                 savedText = decoded
                 content = .text
-            } else if let decoded = UIImage(data: raw) {
+            } else if let decoded = Self.downsampled(raw) {
                 image = decoded
                 content = .image
             } else {
@@ -201,10 +213,12 @@ struct FilePreviewView: View {
     private func save() async {
         guard isDirty, !saving else { return }
         saving = true
+        // Snapshot first — edits during the await must stay dirty.
+        let snapshot = text
         do {
             let svc = try await vm.service()
-            try await svc.writeFile(path: file.path, data: Data(text.utf8))
-            savedText = text
+            try await svc.writeFile(path: file.path, data: Data(snapshot.utf8))
+            savedText = snapshot
             Haptics.tap()
         } catch {
             saveFailed = true
@@ -239,6 +253,34 @@ struct FilePreviewView: View {
             Haptics.failed()
         }
         preparingShare = false
+    }
+
+    /// Decode huge rasters through ImageIO with a pixel cap so a 40 MP
+    /// photo can't blow the memory budget.
+    private static func downsampled(_ data: Data, maxPixel: CGFloat = 4096) -> UIImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let w = props?[kCGImagePropertyPixelWidth] as? CGFloat ?? 0
+        let h = props?[kCGImagePropertyPixelHeight] as? CGFloat ?? 0
+        guard max(w, h) > maxPixel else { return UIImage(data: data) }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else {
+            return UIImage(data: data)
+        }
+        return UIImage(cgImage: cg)
+    }
+
+    /// Left-over share folders from previous runs.
+    static func purgeShareTemps() {
+        let tmp = FileManager.default.temporaryDirectory
+        for item in (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []
+        where item.hasPrefix("preview-") {
+            try? FileManager.default.removeItem(at: tmp.appendingPathComponent(item))
+        }
     }
 }
 
@@ -287,9 +329,12 @@ private struct ZoomableImage: View {
 /// System share sheet.
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
+    var onDone: (() -> Void)?
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+        let vc = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        vc.completionWithItemsHandler = { _, _, _, _ in onDone?() }
+        return vc
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}

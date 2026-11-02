@@ -22,7 +22,13 @@ struct TerminalSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ view: TerminalView, context: Context) {
-        applyStyle(view)
+        // Style diffing: re-applying identical colors/font forces a full
+        // glyph re-layout — skip when nothing actually changed.
+        let signature = Coordinator.StyleSignature(fontSize: fontSize, theme: theme)
+        if context.coordinator.appliedStyle != signature {
+            applyStyle(view)
+            context.coordinator.appliedStyle = signature
+        }
         view.inputAccessoryView = accessory
         context.coordinator.modifiers = modifiers
     }
@@ -36,6 +42,7 @@ struct TerminalSurface: UIViewRepresentable {
         view.nativeBackgroundColor = theme.uiBackground
         view.nativeForegroundColor = theme.uiForeground
         view.caretColor = theme.uiCursor
+        view.backgroundColor = theme.uiBackground
     }
 
     func makeCoordinator() -> Coordinator {
@@ -44,21 +51,28 @@ struct TerminalSurface: UIViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, TerminalViewDelegate {
+        struct StyleSignature: Equatable {
+            let fontSize: Double
+            let theme: TerminalTheme
+        }
+
         private weak var session: TerminalSession?
         private weak var view: TerminalView?
         var modifiers: ModifierState?
+        var appliedStyle: StyleSignature?
+        private var lastBell = Date.distantPast
 
         func attach(session: TerminalSession, view: TerminalView, modifiers: ModifierState?) {
             self.session = session
             self.view = view
             self.modifiers = modifiers
-            session.onOutput = { [weak view] bytes in
+            session.attachOutput { [weak view] bytes in
                 view?.feed(byteArray: bytes)
             }
         }
 
         func detach() {
-            session?.onOutput = nil
+            session?.detachOutput()
             session = nil
         }
 
@@ -87,11 +101,16 @@ struct TerminalSurface: UIViewRepresentable {
         }
 
         func bell(source: TerminalView) {
+            // A runaway `yes | xargs -I{} printf '\a'` must not hammer
+            // the haptic engine — coalesce to 10 Hz.
+            let now = Date()
+            guard now.timeIntervalSince(lastBell) > 0.1 else { return }
+            lastBell = now
             Haptics.bell()
         }
 
         func clipboardCopy(source: TerminalView, content: Data) {
-            UIPasteboard.general.setData(content, forPasteboardType: "public.utf8-plain-text")
+            session?.clipboardWrite(content)
         }
 
         /// Remote clipboard reads are denied — an untrusted server must

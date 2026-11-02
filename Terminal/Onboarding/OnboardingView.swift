@@ -12,6 +12,7 @@ struct OnboardingView: View {
     @State private var port = "22"
     @State private var username = ""
     @State private var password = ""
+    @State private var saveFailed = false
     @FocusState private var focus: Field?
 
     private enum Field { case host, port, username, password }
@@ -69,6 +70,12 @@ struct OnboardingView: View {
             .background(Color(uiColor: .systemBackground).ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .onTapGesture { focus = nil }
+            .alert(
+                "Couldn't store the password — you'll be asked for it when connecting",
+                isPresented: $saveFailed
+            ) {
+                Button("OK") {}
+            }
         }
     }
 
@@ -227,7 +234,10 @@ struct OnboardingView: View {
            let parsed = QuickConnectParser.parse(rawHost, profiles: profiles.profiles) {
             rawHost = parsed.profile.host
             if rawUser.isEmpty { rawUser = parsed.profile.username }
-            if port == "22" { profile.port = parsed.profile.port }
+            // Writing back into the field keeps the parsed port —
+            // the unconditional Int(port) below would otherwise
+            // overwrite it with the default.
+            if port == "22" { port = String(parsed.profile.port) }
             if password.isEmpty, let pw = parsed.password { password = pw }
         }
 
@@ -240,8 +250,11 @@ struct OnboardingView: View {
             Haptics.failed()
             return
         }
-        if !password.isEmpty {
-            Keychain.save(password, tag: "password.\(profile.id.uuidString)")
+        if !password.isEmpty,
+           Keychain.save(password, tag: "password.\(profile.id.uuidString)") != errSecSuccess {
+            // The connect below will ask for the password instead —
+            // but the user should know why.
+            saveFailed = true
         }
         connect(profile)
     }

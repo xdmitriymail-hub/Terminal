@@ -4,7 +4,8 @@ import UIKit
 
 /// Code editor surface over Runestone's `TextView`.
 ///
-/// Dark-only, line numbers, monospace, no autocorrection.
+/// Line numbers, monospace, no autocorrection; colors adapt to the
+/// active light/dark appearance.
 struct EditorView: UIViewRepresentable {
     @Binding var text: String
 
@@ -47,7 +48,9 @@ struct EditorView: UIViewRepresentable {
         textView.smartDashesType = .no
         textView.smartInsertDeleteType = .no
         textView.keyboardType = .asciiCapable
-        textView.keyboardAppearance = .dark
+        // .default follows the interface style — dark keyboard in dark
+        // mode, light in light.
+        textView.keyboardAppearance = .default
         textView.returnKeyType = .default
 
         let accent = UIColor(red: 0.19, green: 0.82, blue: 0.35, alpha: 1)
@@ -88,41 +91,105 @@ private struct EditorCharacterPair: CharacterPair {
     let trailing: String
 }
 
-/// Dark editor palette — a near-black Xcode-style surface.
+/// Adaptive editor palette — Xcode-style in dark, paper in light.
+/// Dynamic UIColors follow trait changes without a state rebuild.
 private final class TerminalEditorTheme: Theme {
-    let backgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1) // #0D0D0F
+    private static func adaptive(dark: UIColor, light: UIColor) -> UIColor {
+        UIColor { traits in
+            traits.userInterfaceStyle == .dark ? dark : light
+        }
+    }
+
+    let backgroundColor = adaptive(
+        dark: UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1),
+        light: UIColor(red: 0.99, green: 0.99, blue: 1, alpha: 1)
+    )
     let font: UIFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
-    let textColor = UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1)
-    let gutterBackgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1)
-    let gutterHairlineColor = UIColor.white.withAlphaComponent(0.06)
-    let lineNumberColor = UIColor.white.withAlphaComponent(0.28)
+    let textColor = adaptive(
+        dark: UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1),
+        light: UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1)
+    )
+    let gutterBackgroundColor = adaptive(
+        dark: UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1),
+        light: UIColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 1)
+    )
+    let gutterHairlineColor = adaptive(
+        dark: UIColor.white.withAlphaComponent(0.06),
+        light: UIColor.black.withAlphaComponent(0.08)
+    )
+    let lineNumberColor = adaptive(
+        dark: UIColor.white.withAlphaComponent(0.28),
+        light: UIColor.black.withAlphaComponent(0.3)
+    )
     let lineNumberFont: UIFont = .monospacedSystemFont(ofSize: 12, weight: .regular)
-    let selectedLineBackgroundColor = UIColor.white.withAlphaComponent(0.05)
-    let selectedLinesLineNumberColor = UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1)
-    let selectedLinesGutterBackgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1)
-    let invisibleCharactersColor = UIColor.white.withAlphaComponent(0.2)
-    let pageGuideHairlineColor = UIColor.white.withAlphaComponent(0.1)
-    let pageGuideBackgroundColor = UIColor.white.withAlphaComponent(0.04)
-    let markedTextBackgroundColor = UIColor.white.withAlphaComponent(0.1)
+    let selectedLineBackgroundColor = adaptive(
+        dark: UIColor.white.withAlphaComponent(0.05),
+        light: UIColor.black.withAlphaComponent(0.05)
+    )
+    let selectedLinesLineNumberColor = adaptive(
+        dark: UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1),
+        light: UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1)
+    )
+    let selectedLinesGutterBackgroundColor = adaptive(
+        dark: UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1),
+        light: UIColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 1)
+    )
+    let invisibleCharactersColor = adaptive(
+        dark: UIColor.white.withAlphaComponent(0.2),
+        light: UIColor.black.withAlphaComponent(0.2)
+    )
+    let pageGuideHairlineColor = adaptive(
+        dark: UIColor.white.withAlphaComponent(0.1),
+        light: UIColor.black.withAlphaComponent(0.1)
+    )
+    let pageGuideBackgroundColor = adaptive(
+        dark: UIColor.white.withAlphaComponent(0.04),
+        light: UIColor.black.withAlphaComponent(0.04)
+    )
+    let markedTextBackgroundColor = adaptive(
+        dark: UIColor.white.withAlphaComponent(0.1),
+        light: UIColor.black.withAlphaComponent(0.1)
+    )
 
     // Unused while the editor runs in plain-text mode, but keeps the
     // theme complete should a tree-sitter language ever be attached.
     func textColor(for highlightName: String) -> UIColor? {
         switch highlightName {
         case "comment":
-            return UIColor(red: 0.47, green: 0.78, blue: 0.51, alpha: 1)
+            return Self.adaptive(
+                dark: UIColor(red: 0.47, green: 0.78, blue: 0.51, alpha: 1),
+                light: UIColor(red: 0.28, green: 0.55, blue: 0.32, alpha: 1)
+            )
         case "keyword", "constant.builtin", "variable.builtin":
-            return UIColor(red: 0.99, green: 0.39, blue: 0.58, alpha: 1)
+            return Self.adaptive(
+                dark: UIColor(red: 0.99, green: 0.39, blue: 0.58, alpha: 1),
+                light: UIColor(red: 0.72, green: 0.16, blue: 0.36, alpha: 1)
+            )
         case "string", "constant.character":
-            return UIColor(red: 0.99, green: 0.55, blue: 0.40, alpha: 1)
+            return Self.adaptive(
+                dark: UIColor(red: 0.99, green: 0.55, blue: 0.40, alpha: 1),
+                light: UIColor(red: 0.77, green: 0.30, blue: 0.13, alpha: 1)
+            )
         case "number":
-            return UIColor(red: 0.85, green: 0.76, blue: 0.45, alpha: 1)
+            return Self.adaptive(
+                dark: UIColor(red: 0.85, green: 0.76, blue: 0.45, alpha: 1),
+                light: UIColor(red: 0.55, green: 0.45, blue: 0.10, alpha: 1)
+            )
         case "type", "constructor":
-            return UIColor(red: 0.58, green: 0.86, blue: 0.99, alpha: 1)
+            return Self.adaptive(
+                dark: UIColor(red: 0.58, green: 0.86, blue: 0.99, alpha: 1),
+                light: UIColor(red: 0.20, green: 0.55, blue: 0.75, alpha: 1)
+            )
         case "function", "property":
-            return UIColor(red: 0.44, green: 0.76, blue: 0.96, alpha: 1)
+            return Self.adaptive(
+                dark: UIColor(red: 0.44, green: 0.76, blue: 0.96, alpha: 1),
+                light: UIColor(red: 0.16, green: 0.42, blue: 0.72, alpha: 1)
+            )
         case "operator", "punctuation":
-            return UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1)
+            return Self.adaptive(
+                dark: UIColor(red: 0.93, green: 0.93, blue: 0.95, alpha: 1),
+                light: UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1)
+            )
         default:
             return nil
         }

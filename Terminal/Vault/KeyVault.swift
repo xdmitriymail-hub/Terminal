@@ -11,6 +11,7 @@ enum KeyVaultError: Error {
     case secureEnclaveUnavailable
     case cannotExport
     case biometricDenied
+    case unsupportedType
 }
 
 /// Creates, stores and produces Citadel auth methods for SSH keys.
@@ -28,7 +29,7 @@ enum KeyVault {
         switch type {
         case .ed25519:
             let privateKey = Crypto.Curve25519.Signing.PrivateKey()
-            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) else {
+            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) == errSecSuccess else {
                 throw KeyVaultError.keyMaterialMissing
             }
             key.publicKeyOpenSSH = SSHWireWriter.publicKeyLine(
@@ -45,7 +46,7 @@ enum KeyVault {
                 nil
             ) else { throw KeyVaultError.secureEnclaveUnavailable }
             let privateKey = try CryptoKit.SecureEnclave.P256.Signing.PrivateKey(accessControl: acl)
-            guard Keychain.save(privateKey.dataRepresentation, tag: key.keychainTag, biometry: false) else {
+            guard Keychain.save(privateKey.dataRepresentation, tag: key.keychainTag, biometry: false) == errSecSuccess else {
                 throw KeyVaultError.keyMaterialMissing
             }
             key.publicKeyOpenSSH = ecdsaPublicLine(curve: "nistp256", point: privateKey.publicKey.x963Representation)
@@ -53,27 +54,27 @@ enum KeyVault {
 
         case .p256:
             let privateKey = Crypto.P256.Signing.PrivateKey()
-            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) else {
+            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) == errSecSuccess else {
                 throw KeyVaultError.keyMaterialMissing
             }
             key.publicKeyOpenSSH = ecdsaPublicLine(curve: "nistp256", point: privateKey.publicKey.x963Representation)
 
         case .p384:
             let privateKey = Crypto.P384.Signing.PrivateKey()
-            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) else {
+            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) == errSecSuccess else {
                 throw KeyVaultError.keyMaterialMissing
             }
             key.publicKeyOpenSSH = ecdsaPublicLine(curve: "nistp384", point: privateKey.publicKey.x963Representation)
 
         case .p521:
             let privateKey = Crypto.P521.Signing.PrivateKey()
-            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) else {
+            guard Keychain.save(privateKey.rawRepresentation, tag: key.keychainTag, biometry: biometry) == errSecSuccess else {
                 throw KeyVaultError.keyMaterialMissing
             }
             key.publicKeyOpenSSH = ecdsaPublicLine(curve: "nistp521", point: privateKey.publicKey.x963Representation)
 
         case .rsa:
-            break // generation unsupported — use ed25519
+            throw KeyVaultError.unsupportedType
         }
 
         key.requiresBiometry = biometry
@@ -88,8 +89,7 @@ enum KeyVault {
         key.name = name.isEmpty ? (parsed.comment.isEmpty ? "key" : parsed.comment) : name
         key.type = parsed.type
         key.publicKeyOpenSSH = parsed.publicKeyLine
-        key.encryptedImport = OpenSSHKeyParser.isEncrypted(pem)
-        guard Keychain.save(parsed.privateMaterial, tag: key.keychainTag, biometry: false) else {
+        guard Keychain.save(parsed.privateMaterial, tag: key.keychainTag, biometry: false) == errSecSuccess else {
             throw KeyVaultError.keyMaterialMissing
         }
         return key
@@ -99,11 +99,17 @@ enum KeyVault {
 
     /// Produces a Citadel authentication method. May trigger Face ID for
     /// biometry-protected keys.
+    ///
+    /// Secure Enclave keys with `.userPresence` ACL prompt *at signing
+    /// time* — deep inside the NIO handshake, off the main actor, where
+    /// the system can't show UI and the prompt fails. Authenticate here
+    /// first and grant a short reuse window so the in-handshake sign
+    /// operation reuses it silently.
     static func authenticationMethod(
         for storedKey: StoredSSHKey,
         username: String,
         context: LAContext? = nil
-    ) throws -> SSHAuthenticationMethod {
+    ) async throws -> SSHAuthenticationMethod {
         switch storedKey.type {
         case .ed25519:
             guard let raw = Keychain.load(tag: storedKey.keychainTag, context: context) else {
@@ -131,7 +137,17 @@ enum KeyVault {
             return .p521(username: username, privateKey: try Crypto.P521.Signing.PrivateKey(rawRepresentation: raw))
 
         case .secureEnclaveP256:
-            guard let raw = Keychain.load(tag: storedKey.keychainTag) else {
+            if storedKey.requiresBiometry {
+                let authContext = LAContext()
+                authContext.touchIDAuthenticationAllowableReuseDuration = 30
+                guard (try? await authContext.evaluatePolicy(
+                    .deviceOwnerAuthentication,
+                    localizedReason: storedKey.name
+                )) == true else {
+                    throw KeyVaultError.biometricDenied
+                }
+            }
+            guard let raw = Keychain.load(tag: storedKey.keychainTag, context: context) else {
                 throw KeyVaultError.keyMaterialMissing
             }
             let seKey = try CryptoKit.SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: raw)
@@ -144,20 +160,49 @@ enum KeyVault {
 
     // MARK: - Export
 
-    static func exportPrivateKey(_ key: StoredSSHKey) throws -> String {
+    /// Writes an openssh-key-v1 private key PEM. `passphrase` encrypts
+    /// with bcrypt-kdf + aes256-ctr (same format ssh-keygen produces);
+    /// empty/nil exports unprotected.
+    static func exportPrivateKey(_ key: StoredSSHKey, passphrase: String? = nil) throws -> String {
         switch key.type {
         case .ed25519:
             guard let raw = Keychain.load(tag: key.keychainTag) else {
                 throw KeyVaultError.keyMaterialMissing
             }
             let privateKey = try Crypto.Curve25519.Signing.PrivateKey(rawRepresentation: raw)
-            return privateKey.makeSSHRepresentation(comment: key.name)
+            let pub = privateKey.publicKey.rawRepresentation
+            var pubBlob = SSHWireWriter()
+            pubBlob.writeText("ssh-ed25519")
+            pubBlob.writeString(pub)
+            var inner = SSHWireWriter()
+            let check = UInt32.random(in: .min ... .max)
+            inner.writeUInt32(check)
+            inner.writeUInt32(check)
+            inner.writeText("ssh-ed25519")
+            inner.writeString(pub)
+            inner.writeString(raw + pub)
+            inner.writeText(key.name)
+            return try wrapKeyV1(publicBlob: pubBlob.data, inner: inner.data, passphrase: passphrase)
 
         case .p256, .p384, .p521:
             guard let raw = Keychain.load(tag: key.keychainTag) else {
                 throw KeyVaultError.keyMaterialMissing
             }
-            return try exportECDSAPrivateKey(type: key.type, scalar: raw, comment: key.name)
+            let (curve, typeName, point) = try ecdsaParts(type: key.type, scalar: raw)
+            var pubBlob = SSHWireWriter()
+            pubBlob.writeText(typeName)
+            pubBlob.writeText(curve)
+            pubBlob.writeString(point)
+            var inner = SSHWireWriter()
+            let check = UInt32.random(in: .min ... .max)
+            inner.writeUInt32(check)
+            inner.writeUInt32(check)
+            inner.writeText(typeName)
+            inner.writeText(curve)
+            inner.writeString(point)
+            inner.writeString(mpint(raw))
+            inner.writeText(key.name)
+            return try wrapKeyV1(publicBlob: pubBlob.data, inner: inner.data, passphrase: passphrase)
 
         case .secureEnclaveP256, .rsa:
             throw KeyVaultError.cannotExport
@@ -173,57 +218,69 @@ enum KeyVault {
         )
     }
 
-    /// Writes an openssh-key-v1 unencrypted private key for ecdsa keys.
-    private static func exportECDSAPrivateKey(type: StoredSSHKey.KeyType, scalar: Data, comment: String) throws -> String {
-        let (curve, typeName): (String, String)
-        switch type {
-        case .p256: (curve, typeName) = ("nistp256", "ecdsa-sha2-nistp256")
-        case .p384: (curve, typeName) = ("nistp384", "ecdsa-sha2-nistp384")
-        case .p521: (curve, typeName) = ("nistp521", "ecdsa-sha2-nistp521")
-        default: throw KeyVaultError.cannotExport
-        }
-        let point: Data
+    /// Curve name, SSH type name and public point for an ecdsa scalar.
+    private static func ecdsaParts(type: StoredSSHKey.KeyType, scalar: Data) throws -> (String, String, Data) {
         switch type {
         case .p256:
             let k = try CryptoKit.P256.Signing.PrivateKey(rawRepresentation: scalar)
-            point = k.publicKey.x963Representation
+            return ("nistp256", "ecdsa-sha2-nistp256", k.publicKey.x963Representation)
         case .p384:
             let k = try CryptoKit.P384.Signing.PrivateKey(rawRepresentation: scalar)
-            point = k.publicKey.x963Representation
+            return ("nistp384", "ecdsa-sha2-nistp384", k.publicKey.x963Representation)
         case .p521:
             let k = try CryptoKit.P521.Signing.PrivateKey(rawRepresentation: scalar)
-            point = k.publicKey.x963Representation
-        default: throw KeyVaultError.cannotExport
+            return ("nistp521", "ecdsa-sha2-nistp521", k.publicKey.x963Representation)
+        default:
+            throw KeyVaultError.cannotExport
+        }
+    }
+
+    /// Pads `inner` to the cipher block size and wraps both sections into
+    /// an openssh-key-v1 PEM, optionally bcrypt-kdf + aes256-ctr encrypted.
+    private static func wrapKeyV1(publicBlob: Data, inner: Data, passphrase: String?) throws -> String {
+        let encrypt = passphrase.map { !$0.isEmpty } ?? false
+        let blockSize = encrypt ? 16 : 8
+        var section = inner
+        let padCount = blockSize - (section.count % blockSize)
+        for i in 1...padCount {
+            section.append(UInt8(i))
         }
 
-        var publicBlob = SSHWireWriter()
-        publicBlob.writeText(typeName)
-        publicBlob.writeText(curve)
-        publicBlob.writeString(point)
-
-        var inner = SSHWireWriter()
-        let check = UInt32.random(in: .min ... .max)
-        inner.writeUInt32(check)
-        inner.writeUInt32(check)
-        inner.writeText(typeName)
-        inner.writeText(curve)
-        inner.writeString(point)
-        inner.writeString(mpint(scalar))
-        inner.writeText(comment)
-        // pad to block size 8 with 1,2,3...
-        let padCount = 8 - (inner.data.count % 8)
-        for i in 1...padCount {
-            inner.writeByte(UInt8(i))
+        let cipher: String
+        let kdfName: String
+        var kdfOptions = Data()
+        if encrypt, let passphrase {
+            var salt = Data(count: 16)
+            let saltStatus = salt.withUnsafeMutableBytes {
+                SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
+            }
+            guard saltStatus == errSecSuccess else { throw KeyVaultError.cannotExport }
+            var kdf = SSHWireWriter()
+            kdf.writeString(salt)
+            kdf.writeUInt32(100)
+            kdfOptions = kdf.data
+            let derived = BCryptPBKDF.pbkdf(
+                password: Data(passphrase.utf8),
+                salt: salt,
+                keyLength: 48,
+                rounds: 100
+            )
+            section = try AESCTR.crypt(key: derived.prefix(32), iv: derived.suffix(16), data: section)
+            cipher = "aes256-ctr"
+            kdfName = "bcrypt"
+        } else {
+            cipher = "none"
+            kdfName = "none"
         }
 
         var outer = Data("openssh-key-v1\0".utf8)
         var w = SSHWireWriter()
-        w.writeText("none")
-        w.writeText("none")
-        w.writeString(Data())
+        w.writeText(cipher)
+        w.writeText(kdfName)
+        w.writeString(kdfOptions)
         w.writeUInt32(1)
-        w.writeString(publicBlob.data)
-        w.writeString(inner.data)
+        w.writeString(publicBlob)
+        w.writeString(section)
         outer.append(w.data)
 
         let b64 = outer.base64EncodedString(options: .lineLength64Characters)

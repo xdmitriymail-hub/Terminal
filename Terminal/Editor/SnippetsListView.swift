@@ -74,18 +74,14 @@ struct SnippetsListView: View {
     }
 
     private func delete(_ offsets: IndexSet) {
-        for index in offsets {
-            snippets.delete(snippets.snippets[index])
-        }
+        let doomed = offsets.compactMap { snippets.snippets[safe: $0] }
+        for snippet in doomed { snippets.delete(snippet) }
     }
 
     private func move(_ offsets: IndexSet, to destination: Int) {
         var order = snippets.snippets
         order.move(fromOffsets: offsets, toOffset: destination)
-        // The store only exposes save/delete — rebuild the array in
-        // the new order; writes are serialized so the last one wins.
-        for snippet in order { snippets.delete(snippet) }
-        for snippet in order { snippets.save(snippet) }
+        snippets.replaceAll(order)
         Haptics.select()
     }
 }

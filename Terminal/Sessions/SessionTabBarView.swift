@@ -99,7 +99,7 @@ private struct SessionPillView: View {
         .foregroundStyle(isActive ? .primary : .secondary)
         .contextMenu {
             Button {
-                Task { await session.reconnect() }
+                session.reconnect()
             } label: {
                 Label("Reconnect", systemImage: "arrow.clockwise")
             }
@@ -108,18 +108,6 @@ private struct SessionPillView: View {
             } label: {
                 Label("Close", systemImage: "xmark")
             }
-        }
-    }
-}
-
-extension StatusDot.State {
-    init(_ sessionState: TerminalSession.State) {
-        switch sessionState {
-        case .connecting: self = .connecting
-        case .online: self = .online
-        case .reconnecting: self = .reconnecting
-        case .offline: self = .offline
-        case .failed: self = .failed
         }
     }
 }

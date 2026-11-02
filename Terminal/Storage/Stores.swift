@@ -1,15 +1,32 @@
 import Combine
 import Foundation
 
+/// Versioned JSON persistence. Writes are atomic and always create the
+/// file; an unreadable or corrupt file locks the store so a later save
+/// can never clobber the user's data with an empty payload.
 final class JSONStore<T: Codable> {
-    private let url: URL
-    private let queue = DispatchQueue(label: "jsonstore", qos: .utility)
-    private var cached: T?
-    private let initial: T
+    private struct Box: Codable {
+        var version: Int
+        var payload: T
+    }
 
-    init(_ name: String, initial: T) {
+    private let url: URL
+    private let version: Int
+    private let migrate: ((Int, inout T) -> Void)?
+    private let initial: T
+    private let lock = NSLock()
+    private var cached: T?
+    private var blocked = false
+
+    /// Last persistence error, for surfacing in UI.
+    private(set) var lastError: Error?
+
+    init(_ name: String, initial: T, version: Int = 1, directory: URL? = nil, migrate: ((Int, inout T) -> Void)? = nil) {
         self.initial = initial
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        self.version = version
+        self.migrate = migrate
+        let dir = directory
+            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         url = dir.appendingPathComponent("\(name).json")
         try? FileManager.default.setAttributes(
@@ -18,23 +35,63 @@ final class JSONStore<T: Codable> {
         )
     }
 
-    func load() -> T {
-        if let cached { return cached }
-        guard let data = try? Data(contentsOf: url),
-              let value = try? JSONDecoder().decode(T.self, from: data) else {
-            return initial
-        }
-        cached = value
-        return value
+    var writable: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !blocked
     }
 
-    func save(_ value: T) {
+    func load() -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached { return cached }
+        do {
+            let data = try Data(contentsOf: url)
+            do {
+                var box = try JSONDecoder().decode(Box.self, from: data)
+                if box.version > version {
+                    // A newer app wrote this — don't clobber a schema we
+                    // don't understand.
+                    blocked = true
+                    return box.payload
+                }
+                if box.version < version {
+                    migrate?(box.version, &box.payload)
+                }
+                cached = box.payload
+                return box.payload
+            } catch {
+                // Legacy unversioned payload.
+                let value = try JSONDecoder().decode(T.self, from: data)
+                cached = value
+                return value
+            }
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
+            // No file yet — a fresh install, fully writable.
+            return initial
+        } catch {
+            // Locked (pre-first-unlock) or corrupt: never overwrite.
+            blocked = true
+            lastError = error
+            return initial
+        }
+    }
+
+    @discardableResult
+    func save(_ value: T) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
         cached = value
-        queue.async { [url] in
-            guard let data = try? JSONEncoder().encode(value) else { return }
-            let tmp = url.appendingPathExtension("tmp")
-            try? data.write(to: tmp, options: [.completeFileProtection])
-            try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        guard !blocked else { return false }
+        do {
+            let data = try JSONEncoder().encode(Box(version: version, payload: value))
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            lastError = nil
+            return true
+        } catch {
+            lastError = error
+            return false
         }
     }
 }
@@ -44,15 +101,18 @@ final class ProfilesStore: ObservableObject {
     @Published private(set) var profiles: [ServerProfile]
     private let store = JSONStore("profiles", initial: [ServerProfile]())
 
+    var storageError: Error? { store.lastError }
+
     init() { profiles = store.load() }
 
-    func save(_ profile: ServerProfile) {
+    @discardableResult
+    func save(_ profile: ServerProfile) -> Bool {
         if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[idx] = profile
         } else {
             profiles.append(profile)
         }
-        store.save(profiles)
+        return store.save(profiles)
     }
 
     func delete(_ profile: ServerProfile) {
@@ -75,13 +135,14 @@ final class KeysStore: ObservableObject {
 
     init() { keys = store.load() }
 
-    func save(_ key: StoredSSHKey) {
+    @discardableResult
+    func save(_ key: StoredSSHKey) -> Bool {
         if let idx = keys.firstIndex(where: { $0.id == key.id }) {
             keys[idx] = key
         } else {
             keys.append(key)
         }
-        store.save(keys)
+        return store.save(keys)
     }
 
     func delete(_ key: StoredSSHKey) {
@@ -136,17 +197,24 @@ final class SnippetsStore: ObservableObject {
 
     init() { snippets = store.load() }
 
-    func save(_ snippet: Snippet) {
+    @discardableResult
+    func save(_ snippet: Snippet) -> Bool {
         if let idx = snippets.firstIndex(where: { $0.id == snippet.id }) {
             snippets[idx] = snippet
         } else {
             snippets.append(snippet)
         }
-        store.save(snippets)
+        return store.save(snippets)
     }
 
     func delete(_ snippet: Snippet) {
         snippets.removeAll { $0.id == snippet.id }
+        store.save(snippets)
+    }
+
+    /// One write for reorder/move operations.
+    func replaceAll(_ snippets: [Snippet]) {
+        self.snippets = snippets
         store.save(snippets)
     }
 }

@@ -112,6 +112,26 @@ enum QuickConnectParser {
             h = String(h[h.index(after: at)...])
         }
 
+        // Bracketed IPv6: "[::1]", "[::1]:2222" — the address lives
+        // inside brackets; an optional :port follows the closing one.
+        if h.hasPrefix("[") {
+            guard let close = h.firstIndex(of: "]") else { return nil }
+            let addr = String(h[h.index(after: h.startIndex)..<close])
+            guard !addr.isEmpty else { return nil }
+            let tail = h[h.index(after: close)...]
+            if tail.isEmpty {
+                h = addr
+            } else if tail.hasPrefix(":"),
+                      let parsed = Int(tail.dropFirst()),
+                      (1...65535).contains(parsed) {
+                h = addr
+                p = parsed
+            } else {
+                return nil
+            }
+            return (u, h, p)
+        }
+
         let colons = h.filter { $0 == ":" }.count
         if colons == 1, let colon = h.lastIndex(of: ":") {
             let tail = String(h[h.index(after: colon)...])

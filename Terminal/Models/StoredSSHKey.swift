@@ -8,7 +8,6 @@ struct StoredSSHKey: Codable, Identifiable, Hashable, Sendable {
     var created = Date()
     var inSecureEnclave = false
     var requiresBiometry = false
-    var encryptedImport = false
 
     enum KeyType: String, Codable, Hashable, Sendable {
         case ed25519

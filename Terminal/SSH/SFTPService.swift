@@ -6,7 +6,7 @@ struct RemoteFile: Identifiable, Hashable, Sendable {
     var id: String { path }
     let name: String
     let path: String
-    let isDirectory: Bool
+    var isDirectory: Bool
     let size: UInt64?
     let permissions: UInt32?
     let modified: Date?
@@ -18,9 +18,11 @@ struct RemoteFile: Identifiable, Hashable, Sendable {
 }
 
 /// Thin async facade over Citadel SFTPClient with progress-friendly
-/// chunked transfers.
+/// chunked transfers. Mutations go through a sibling temp file +
+/// rename so a dropped connection can never truncate a remote file.
 final class SFTPService: @unchecked Sendable {
     private let sftp: Citadel.SFTPClient
+    private static let chunk = 256 * 1024
 
     init(sftp: Citadel.SFTPClient) {
         self.sftp = sftp
@@ -63,6 +65,10 @@ final class SFTPService: @unchecked Sendable {
         }
     }
 
+    func remove(path: String) async throws {
+        try await sftp.remove(at: path)
+    }
+
     func rename(from: String, to: String) async throws {
         try await sftp.rename(at: from, to: to)
     }
@@ -73,34 +79,59 @@ final class SFTPService: @unchecked Sendable {
         try await sftp.setAttributes(at: path, to: attrs)
     }
 
+    /// stat() follows symlinks, so the answer describes the target.
+    func stat(path: String) async throws -> SFTPFileAttributes {
+        try await sftp.getAttributes(at: path)
+    }
+
+    func exists(path: String) async -> Bool {
+        (try? await sftp.getAttributes(at: path)) != nil
+    }
+
     /// Reads loop until a true empty read — servers may legally return
     /// short reads mid-file, so "< chunk" is never treated as EOF.
-    func readFile(path: String, maxBytes: Int = 4_000_000) async throws -> Data {
+    /// `isComplete` is only true when EOF was actually observed.
+    func readFile(path: String, maxBytes: Int = 4_000_000) async throws -> (data: Data, isComplete: Bool) {
         try await sftp.withFile(filePath: path, flags: .read) { file in
             var out = Data()
             out.reserveCapacity(min(maxBytes, 1_000_000))
             var offset: UInt64 = 0
-            let chunk = UInt32(256 * 1024)
+            var sawEOF = false
             while out.count < maxBytes {
-                let buffer = try await file.read(from: offset, length: chunk)
+                let want = UInt32(min(Self.chunk, maxBytes - out.count))
+                let buffer = try await file.read(from: offset, length: want)
                 let bytes = buffer.readableBytes
-                if bytes == 0 { break }
+                if bytes == 0 { sawEOF = true; break }
                 out.append(contentsOf: buffer.readableBytesView)
                 offset += UInt64(bytes)
             }
-            return out
+            return (out, sawEOF)
         }
     }
 
+    /// Write to a sibling temp file, then rename over the target —
+    /// never a half-truncated original on the server.
     func writeFile(path: String, data: Data) async throws {
-        try await sftp.withFile(filePath: path, flags: [.write, .create, .truncate]) { file in
-            var offset: UInt64 = 0
-            let chunk = 256 * 1024
-            while offset < data.count {
-                let end = min(offset + UInt64(chunk), UInt64(data.count))
-                try await file.write(ByteBuffer(data: data[Int(offset)..<Int(end)]), at: offset)
-                offset = end
+        let tmp = path + ".sftp-tmp"
+        do {
+            try await sftp.withFile(filePath: tmp, flags: [.write, .create, .truncate]) { file in
+                var offset: UInt64 = 0
+                while offset < data.count {
+                    let end = min(offset + UInt64(Self.chunk), UInt64(data.count))
+                    try await file.write(ByteBuffer(data: data[Int(offset)..<Int(end)]), at: offset)
+                    offset = end
+                }
             }
+            do {
+                try await sftp.rename(at: tmp, to: path)
+            } catch {
+                // RFC 3012 rename doesn't overwrite; remove and retry.
+                try? await sftp.remove(at: path)
+                try await sftp.rename(at: tmp, to: path)
+            }
+        } catch {
+            try? await sftp.remove(at: tmp)
+            throw error
         }
     }
 
@@ -112,9 +143,9 @@ final class SFTPService: @unchecked Sendable {
             defer { try? handle.close() }
 
             var offset: UInt64 = 0
-            let chunk: UInt32 = 256 * 1024
             while true {
-                let buffer = try await file.read(from: offset, length: chunk)
+                try Task.checkCancellation()
+                let buffer = try await file.read(from: offset, length: UInt32(Self.chunk))
                 let bytes = buffer.readableBytes
                 if bytes == 0 { break }
                 try handle.write(Data(buffer.readableBytesView))
@@ -127,22 +158,34 @@ final class SFTPService: @unchecked Sendable {
         progress?(1)
     }
 
-    /// Upload a local file in chunks, reporting progress 0…1.
+    /// Upload a local file in chunks via temp + rename, reporting 0…1.
     func upload(local: URL, to path: String, progress: (@Sendable (Double) -> Void)? = nil) async throws {
         let total = (try? FileManager.default.attributesOfItem(atPath: local.path)[.size] as? UInt64) ?? 0
         let readHandle = try FileHandle(forReadingFrom: local)
         defer { try? readHandle.close() }
 
-        try await sftp.withFile(filePath: path, flags: [.write, .create, .truncate]) { file in
-            var offset: UInt64 = 0
-            let chunk = 256 * 1024
-            while let data = try readHandle.read(upToCount: chunk), !data.isEmpty {
-                try await file.write(ByteBuffer(data: data), at: offset)
-                offset += UInt64(data.count)
-                if total > 0 {
-                    progress?(Double(offset) / Double(total))
+        let tmp = path + ".sftp-tmp"
+        do {
+            try await sftp.withFile(filePath: tmp, flags: [.write, .create, .truncate]) { file in
+                var offset: UInt64 = 0
+                while let data = try readHandle.read(upToCount: Self.chunk), !data.isEmpty {
+                    try Task.checkCancellation()
+                    try await file.write(ByteBuffer(data: data), at: offset)
+                    offset += UInt64(data.count)
+                    if total > 0 {
+                        progress?(Double(offset) / Double(total))
+                    }
                 }
             }
+            do {
+                try await sftp.rename(at: tmp, to: path)
+            } catch {
+                try? await sftp.remove(at: path)
+                try await sftp.rename(at: tmp, to: path)
+            }
+        } catch {
+            try? await sftp.remove(at: tmp)
+            throw error
         }
         progress?(1)
     }

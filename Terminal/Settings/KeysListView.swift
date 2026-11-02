@@ -94,9 +94,10 @@ struct KeysListView: View {
     }
 
     private func delete(_ offsets: IndexSet) {
-        for index in offsets {
-            keys.delete(keys.keys[index])
-        }
+        // Snapshot first — each delete mutates the array and shifts
+        // the indexes the remaining offsets point at.
+        let doomed = offsets.compactMap { keys.keys[safe: $0] }
+        for key in doomed { keys.delete(key) }
     }
 
     /// The base64 body only — the wire prefix ("ssh-ed25519 …") stays
@@ -124,6 +125,9 @@ private struct KeyDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var exportedPEM: String?
+    @State private var showExportSheet = false
+    @State private var exportPassphrase = ""
+    @State private var exportFailed = false
 
     private var canExport: Bool {
         !key.inSecureEnclave && key.type != .rsa
@@ -168,7 +172,9 @@ private struct KeyDetailView: View {
 
                         if canExport {
                             Button {
-                                exportPrivate()
+                                exportPassphrase = ""
+                                exportFailed = false
+                                showExportSheet = true
                             } label: {
                                 pill("Export private", symbol: "lock.open")
                             }
@@ -193,6 +199,37 @@ private struct KeyDetailView: View {
                             .background(Color.primary.opacity(0.1), in: Circle())
                     }
                 }
+            }
+            .sheet(isPresented: $showExportSheet) {
+                NavigationStack {
+                    Form {
+                        Section {
+                            SecureField("Passphrase (optional)", text: $exportPassphrase)
+                        } footer: {
+                            Text("A passphrase encrypts the exported file. Without one, anyone holding the file owns the key.")
+                        }
+                        if exportFailed {
+                            Section {
+                                Text("Couldn't export this key")
+                                    .font(.footnote)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                    }
+                    .scrollContentBackground(.hidden)
+                    .background(Color.terminalSurface.ignoresSafeArea())
+                    .navigationTitle("Export Private Key")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showExportSheet = false }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Export") { exportPrivate() }
+                        }
+                    }
+                }
+                .presentationDetents([.medium])
             }
             .sheet(
                 isPresented: Binding(
@@ -229,12 +266,18 @@ private struct KeyDetailView: View {
     private func exportPrivate() {
         Task {
             guard await BiometricGate.evaluate(key.name) else {
+                exportFailed = true
                 Haptics.failed()
                 return
             }
             do {
-                exportedPEM = try KeyVault.exportPrivateKey(key)
+                exportedPEM = try KeyVault.exportPrivateKey(
+                    key,
+                    passphrase: exportPassphrase.isEmpty ? nil : exportPassphrase
+                )
+                showExportSheet = false
             } catch {
+                exportFailed = true
                 Haptics.failed()
             }
         }
@@ -250,7 +293,8 @@ private struct KeyImportView: View {
     @State private var name = ""
     @State private var pem = ""
     @State private var passphrase = ""
-    @State private var failed = false
+    @State private var failure: String?
+    @State private var importing = false
 
     private var encrypted: Bool {
         OpenSSHKeyParser.isEncrypted(pem)
@@ -277,7 +321,7 @@ private struct KeyImportView: View {
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .overlay(alignment: .topTrailing) {
-                                if failed {
+                                if failure != nil {
                                     Image(systemName: "exclamationmark.circle.fill")
                                         .font(.footnote)
                                         .foregroundStyle(.red)
@@ -300,38 +344,70 @@ private struct KeyImportView: View {
                         SecureField("Passphrase", text: $passphrase)
                     }
                 }
+
+                if let failure {
+                    Section {
+                        Text(failure)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
             .background(Color.terminalSurface.ignoresSafeArea())
             .navigationTitle("Import")
             .navigationBarTitleDisplayMode(.inline)
-            .onChange(of: pem) { _, _ in failed = false }
+            .onChange(of: pem) { _, _ in failure = nil }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") { add() }
-                        .disabled(!canAdd)
+                    if importing {
+                        ProgressView()
+                    } else {
+                        Button("Add") { add() }
+                            .disabled(!canAdd)
+                    }
                 }
             }
+            .interactiveDismissDisabled(importing)
         }
         .presentationDetents([.medium, .large])
     }
 
     private func add() {
-        do {
-            let key = try KeyVault.`import`(
-                pem: pem,
-                name: name.trimmingCharacters(in: .whitespaces),
-                passphrase: passphrase.isEmpty ? nil : passphrase
-            )
-            keys.save(key)
-            Haptics.connected()
-            dismiss()
-        } catch {
-            failed = true
-            Haptics.failed()
+        // bcrypt KDF on an encrypted key can run for seconds — never
+        // on the main actor.
+        let pem = self.pem
+        let name = self.name.trimmingCharacters(in: .whitespaces)
+        let passphrase = self.passphrase.isEmpty ? nil : self.passphrase
+        importing = true
+        Task {
+            do {
+                let key = try await Task.detached(priority: .userInitiated) {
+                    try KeyVault.`import`(pem: pem, name: name, passphrase: passphrase)
+                }.value
+                keys.save(key)
+                Haptics.connected()
+                dismiss()
+            } catch {
+                importing = false
+                failure = (error as? SSHKeyImportError).map(Self.describe) ?? "Couldn't read this key"
+                Haptics.failed()
+            }
+        }
+    }
+
+    private static func describe(_ error: SSHKeyImportError) -> String {
+        switch error {
+        case .invalidFormat: return "Not an OpenSSH private key"
+        case .encryptedNeedsPassphrase: return "This key needs its passphrase"
+        case .wrongPassphrase: return "Wrong passphrase"
+        case .unsupportedCipher(let c): return "Unsupported cipher: \(c)"
+        case .unsupportedKDF(let k): return "Unsupported KDF: \(k)"
+        case .unsupportedKeyType(let t): return "Unsupported key type: \(t)"
+        case .corrupt: return "The key material is corrupt"
         }
     }
 }

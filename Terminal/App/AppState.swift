@@ -19,6 +19,7 @@ final class AppState: ObservableObject {
     )
 
     @Published var locked = false
+    private var unlocking = false
 
     init() {
         if settings.settings.requireBiometry {
@@ -28,8 +29,12 @@ final class AppState: ObservableObject {
         keepAlive.setEnabled(settings.settings.keepAlive)
     }
 
+    /// Single evaluation at a time — a cancelled prompt followed by a
+    /// retry must never stack two Face ID sheets.
     func unlock() async {
-        guard locked else { return }
+        guard locked, !unlocking else { return }
+        unlocking = true
+        defer { unlocking = false }
         if await BiometricGate.evaluate("Unlock Terminal") {
             locked = false
         }

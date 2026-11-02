@@ -46,15 +46,19 @@ struct SettingsView: View {
 
                 Section {
                     Toggle(isOn: $settings.settings.keepAlive) {
-                        rowLabel("Keep sessions", icon: "antenna.radiowaves.left.and.right")
+                        rowLabel("Background sessions", icon: "antenna.radiowaves.left.and.right")
                     }
                     .onChange(of: settings.settings.keepAlive) { _, on in
                         keepAlive.setEnabled(on)
                     }
 
+                    Toggle(isOn: $settings.settings.remoteClipboard) {
+                        rowLabel("Remote clipboard", icon: "doc.on.clipboard")
+                    }
+
                     if BiometricGate.available {
                         Toggle(isOn: $settings.settings.requireBiometry) {
-                            rowLabel("Lock on open", icon: "faceid")
+                            rowLabel("Passcode or Face ID", icon: "faceid")
                         }
                     }
 

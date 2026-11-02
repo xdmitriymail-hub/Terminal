@@ -31,6 +31,21 @@ final class SessionEngine: ObservableObject {
     /// ask the user, store it, then let the session retry.
     var onAuthNeeded: (@MainActor (TerminalSession) -> Void)?
 
+    /// Set by UI layer: the remote host wants to write the clipboard —
+    /// the user confirms once per session.
+    var onClipboardRequest: (@MainActor (TerminalSession, Data) -> Void)?
+
+    /// tmux presence per profile — detected once, reused across tabs.
+    private var tmuxAvailable: [UUID: Bool] = [:]
+
+    /// Detects tmux on the session's host, caching the answer per profile.
+    func hasTmux(on session: TerminalSession) async -> Bool {
+        if let cached = tmuxAvailable[session.profile.id] { return cached }
+        let found = await session.detectTmux()
+        tmuxAvailable[session.profile.id] = found
+        return found
+    }
+
     init(profiles: ProfilesStore, keys: KeysStore, knownHosts: KnownHostsStore, settings: SettingsStore) {
         self.profiles = profiles
         self.keys = keys
@@ -100,7 +115,7 @@ final class SessionEngine: ObservableObject {
             guard let stored = keys.key(id: keyID) else {
                 throw KeyVaultError.keyMaterialMissing
             }
-            return try KeyVault.authenticationMethod(for: stored, username: profile.username)
+            return try await KeyVault.authenticationMethod(for: stored, username: profile.username)
         }
     }
 
@@ -125,9 +140,9 @@ final class SessionEngine: ObservableObject {
         }
     }
 
-    /// Called by the UI when the user accepts a changed key: re-pin and allow.
-    func trustReplacement(host: String, port: Int, keyLine: String) {
-        knownHosts.trust(host: host, port: port, publicKeyOpenSSH: keyLine)
+    /// Drops the cached tmux answer for a profile (e.g. after a rebuild).
+    func resetTmuxCache(for profileID: UUID) {
+        tmuxAvailable[profileID] = nil
     }
 
     /// Drops a pooled transport (e.g. when profile secrets changed).
@@ -149,8 +164,8 @@ final class SessionEngine: ObservableObject {
         sessions.append(session)
         activeSessionID = session.id
         profiles.markConnected(profile.id)
+        session.start(cols: cols, rows: rows)
         Task {
-            await session.start(cols: cols, rows: rows)
             await applyForwards(for: profile)
         }
         return session
@@ -206,21 +221,32 @@ final class SessionEngine: ObservableObject {
     /// After a network change, verify pooled connections still answer;
     /// silently reconnect dead ones so sessions come back instantly.
     private func probeConnections() async {
-        for (_, conn) in connections {
-            if await !conn.isConnected {
-                await conn.markDisconnected()
-            }
-        }
+        await probeAllConnections()
         guard settings.settings.autoReconnect else { return }
         for session in sessions where session.wantsReconnect {
             await session.reconnectIfNeeded()
         }
     }
 
+    /// Real transport probe for every pooled connection: a remote no-op
+    /// proves auth + channels still work. Dead transports are dropped so
+    /// the next channel request re-handshakes lazily.
+    private func probeAllConnections() async {
+        for (_, conn) in connections {
+            guard await conn.isConnected else {
+                await conn.markDisconnected()
+                continue
+            }
+            if await !conn.probe() {
+                await conn.markDisconnected()
+            }
+        }
+    }
+
     private func startKeepAlive() {
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.sessions.forEach { $0.keepAlive() }
+                await self?.probeAllConnections()
             }
         }
         keepAliveTimer?.tolerance = 5

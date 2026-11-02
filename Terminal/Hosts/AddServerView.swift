@@ -16,6 +16,7 @@ struct AddServerView: View {
     @State private var selectedKeyID: UUID?
     @State private var showKeyGen = false
     @State private var keyIDsBefore: Set<UUID> = []
+    @State private var errorMessage: String?
 
     init(profile: ServerProfile? = nil) {
         isEditing = profile != nil
@@ -108,6 +109,9 @@ struct AddServerView: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .tint(.terminalAccent)
             .navigationTitle(isEditing ? "Edit" : "New Server")
+            .alert(errorMessage ?? "", isPresented: errorPresented) {
+                Button("OK") { errorMessage = nil }
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -153,6 +157,13 @@ struct AddServerView: View {
         useKey = true
     }
 
+    private var errorPresented: Binding<Bool> {
+        Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )
+    }
+
     // MARK: - Save
 
     private func save() {
@@ -177,7 +188,13 @@ struct AddServerView: View {
         } else {
             draft.auth = .password
             if !password.isEmpty {
-                Keychain.save(password, tag: "password.\(draft.id.uuidString)")
+                // Keep the form open when the secret can't be stored —
+                // saving without it would lock the user out next time.
+                guard Keychain.save(password, tag: "password.\(draft.id.uuidString)") == errSecSuccess else {
+                    Haptics.failed()
+                    errorMessage = "Couldn't store the password"
+                    return
+                }
             }
         }
 

@@ -13,7 +13,9 @@ enum AESCTR {
         out.reserveCapacity(data.count)
 
         var block = [UInt8](repeating: 0, count: 16)
-        var blockUsed = 0
+        // 16 → the first read generates a real keystream block;
+        // starting at 0 would XOR the first block with zeros.
+        var blockUsed = 16
 
         func nextKeystreamByte() throws -> UInt8 {
             if blockUsed == 16 {

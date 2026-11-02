@@ -4,6 +4,7 @@ import SwiftUI
 /// host-key trust prompt shared by all connections.
 struct RootView: View {
     @EnvironmentObject var engine: SessionEngine
+    @EnvironmentObject var keepAlive: KeepAliveEngine
     @AppStorage("onboarding.done") private var onboardingDone = false
 
     @State private var showSessionPicker = false
@@ -19,6 +20,7 @@ struct RootView: View {
     @State private var pendingHostKey: HostKeyEvent?
     @State private var hostKeyQueue: [(HostKeyEvent, CheckedContinuation<Bool, Never>)] = []
     @State private var hostKeyPromptActive = false
+    @State private var clipboardRequest: ClipboardRequest?
 
     var body: some View {
         ZStack {
@@ -67,13 +69,28 @@ struct RootView: View {
             }
         }
         .confirmationDialog(
-            pendingHostKey.map { _ in "" } ?? "",
+            hostKeyTitle,
             isPresented: hostKeyPromptPresented,
             titleVisibility: .visible
         ) {
             hostKeyButtons
         } message: {
             hostKeyMessage
+        }
+        .confirmationDialog(
+            "Allow Clipboard Write",
+            isPresented: Binding(
+                get: { clipboardRequest != nil },
+                set: { if !$0 { clipboardRequest = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Allow Once") { resolveClipboard(true) }
+            Button("Deny", role: .cancel) { resolveClipboard(false) }
+        } message: {
+            if let request = clipboardRequest {
+                Text("\(request.session.profile.endpoint) wants to write \(request.data.count) bytes to the clipboard")
+            }
         }
         .task {
             engine.hostKeyDecider = { event in
@@ -85,6 +102,13 @@ struct RootView: View {
             engine.onAuthNeeded = { session in
                 passwordSession = session
             }
+            engine.onClipboardRequest = { session, data in
+                clipboardRequest = ClipboardRequest(session: session, data: data)
+            }
+            keepAlive.setHasSessions(!engine.sessions.isEmpty)
+        }
+        .onChange(of: engine.sessions.isEmpty) { _, empty in
+            keepAlive.setHasSessions(!empty)
         }
     }
 
@@ -92,14 +116,17 @@ struct RootView: View {
 
     private var workspace: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
+            ZStack {
                 ForEach(engine.sessions) { session in
                     TerminalScreenView(session: session)
                         .opacity(session.id == engine.activeSessionID ? 1 : 0)
                         .allowsHitTesting(session.id == engine.activeSessionID)
                         .zIndex(session.id == engine.activeSessionID ? 1 : 0)
                 }
-
+            }
+            // Inset, not overlay — terminal content must never slide
+            // under the tab bar.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 SessionTabBarView(
                     onNewSession: { showSessionPicker = true },
                     onShowGrid: { showGrid = true }
@@ -194,8 +221,13 @@ struct RootView: View {
         passwordSession = nil
         passwordText = ""
         guard !text.isEmpty else { return }
-        Keychain.save(text, tag: "password.\(session.profile.id.uuidString)")
-        Task { await session.reconnect() }
+        // If the store fails, reconnecting would re-prompt forever —
+        // say so instead.
+        guard Keychain.save(text, tag: "password.\(session.profile.id.uuidString)") == errSecSuccess else {
+            errorMessage = "Couldn't store the password"
+            return
+        }
+        session.reconnect()
     }
 
     // MARK: - Host key prompt
@@ -227,27 +259,54 @@ struct RootView: View {
         presentNextHostKey()
     }
 
+    private var hostKeyTitle: String {
+        if case .changed = pendingHostKey {
+            return "Host Key Changed"
+        }
+        return "Verify Host Key"
+    }
+
     @ViewBuilder
     private var hostKeyButtons: some View {
         if case .changed = pendingHostKey {
-            Button("Trust", role: .destructive) { resolveHostKey(true) }
-            Button("Cancel", role: .cancel) { resolveHostKey(false) }
+            Button("Trust Anyway", role: .destructive) { resolveHostKey(true) }
+            Button("Decline", role: .cancel) { resolveHostKey(false) }
         } else {
             Button("Trust") { resolveHostKey(true) }
-            Button("Cancel", role: .cancel) { resolveHostKey(false) }
+            Button("Decline", role: .cancel) { resolveHostKey(false) }
         }
     }
 
     @ViewBuilder
     private var hostKeyMessage: some View {
         switch pendingHostKey {
-        case .unknown(let host, _, _, _):
-            Text("First connection to \(host)")
-        case .changed(let host, _, _, _, let fingerprint):
-            Text("The identity of \(host) changed\n\(fingerprint)")
+        case .unknown(let host, let port, let keyLine, let fingerprint):
+            Text("First connection to \(host):\(port)\n\(Self.keyAlgorithm(of: keyLine))\n\(fingerprint)")
+        case .changed(let host, let port, let keyLine, let expected, let fingerprint):
+            Text("The identity of \(host):\(port) changed — verify the new fingerprint out of band.\n\(Self.keyAlgorithm(of: keyLine))\nWas: \(expected)\nNow: \(fingerprint)")
         case .none:
             EmptyView()
         }
+    }
+
+    private static func keyAlgorithm(of keyLine: String) -> String {
+        keyLine.split(separator: " ").first.map(String.init) ?? "key"
+    }
+
+    // MARK: - Clipboard consent
+
+    private struct ClipboardRequest: Identifiable {
+        let id = UUID()
+        let session: TerminalSession
+        let data: Data
+    }
+
+    private func resolveClipboard(_ allow: Bool) {
+        guard let request = clipboardRequest else { return }
+        clipboardRequest = nil
+        guard allow else { return }
+        request.session.clipboardAllowed = true
+        request.session.clipboardWrite(request.data)
     }
 }
 
