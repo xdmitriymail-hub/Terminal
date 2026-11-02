@@ -35,7 +35,7 @@ final class SFTPService: @unchecked Sendable {
             .flatMap(\.components)
             .map { entry in
                 let perms = entry.attributes.permissions
-                let isDir = perms.map { ($0 & 0o170000) == 0o040000 } ?? entry.filename.hasSuffix("/")
+                let isDir = (perms ?? 0) & 0o170000 == 0o040000 || entry.filename.hasSuffix("/")
                 var modified: Date?
                 if let amtime = entry.attributes.accessModificationTime {
                     modified = amtime.modificationTime

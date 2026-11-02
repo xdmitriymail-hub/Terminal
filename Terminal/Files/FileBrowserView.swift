@@ -45,7 +45,7 @@ private struct FileBrowserContent: View {
             .sheet(isPresented: $showTransfers) {
                 TransfersView()
             }
-            .fileImporter(isPresented: $showImporter, types: [.item]) { result in
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
                 handleImport(result)
             }
             .alert("New Folder", isPresented: $showNewFolder) {
