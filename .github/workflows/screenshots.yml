@@ -1,0 +1,112 @@
+name: Screenshots
+
+on:
+  workflow_dispatch
+
+jobs:
+  shots:
+    name: Drive app in Simulator, capture screens
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate projects
+        run: |
+          xcodegen
+          (cd Screenshots && xcodegen)
+
+      - name: Resolve + patch SwiftTerm
+        run: |
+          xcodebuild \
+            -project Terminal.xcodeproj \
+            -scheme Terminal \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipPackagePluginValidation \
+            -resolvePackageDependencies
+          FILE=$(find ~/Library/Developer/Xcode/DerivedData -path '*SwiftTerm*/PowerlineRenderer.swift' | head -1)
+          [ -n "$FILE" ] || { echo "PowerlineRenderer.swift not found"; exit 1; }
+          sed -i '' 's/flameLowerPath\.dropFirst()/Array(flameLowerPath.dropFirst())/' "$FILE"
+
+      - name: Build app for Simulator
+        run: |
+          xcodebuild \
+            -project Terminal.xcodeproj \
+            -scheme Terminal \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          ls build/Build/Products/Debug-iphonesimulator/Terminal.app
+
+      - name: Boot simulator + install
+        run: |
+          set -e
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c "
+          import json,sys
+          rs=[r for r in json.load(sys.stdin)['runtimes'] if r['platform']=='iOS' and r.get('isAvailable',True)]
+          rs.sort(key=lambda r:[int(x) for x in r['version'].split('-')[0].split('.')],reverse=True)
+          print(rs[0]['identifier'])")
+          echo "runtime: $RUNTIME"
+          UDID=$(xcrun simctl create shots com.apple.CoreSimulator.SimDeviceType.iPhone-16 "$RUNTIME" 2>/dev/null \
+            || xcrun simctl create shots com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME" \
+            || xcrun simctl create shots com.apple.CoreSimulator.SimDeviceType.iPhone-14 "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/Terminal.app
+
+      - name: Drive UI + capture screenshots
+        run: |
+          mkdir -p shots
+          xcodebuild test \
+            -project Screenshots/Shots.xcodeproj \
+            -scheme Shots \
+            -destination "platform=iOS Simulator,id=$UDID" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            > test.log 2>&1 &
+          TPID=$!
+          (
+            tail -f test.log | while IFS= read -r line; do
+              case "$line" in
+                *SHOT:*)
+                  name=$(echo "$line" | sed -n 's/.*SHOT:\([a-z0-9-]*\).*/\1/p' | head -1)
+                  if [ -n "$name" ]; then
+                    sleep 2
+                    xcrun simctl io "$UDID" screenshot "shots/$name.png"
+                    echo "DONE:$name" | xcrun simctl pbcopy "$UDID"
+                    echo "captured $name"
+                  fi
+                  ;;
+                *APPEAR:light*)
+                  xcrun simctl ui "$UDID" appearance light
+                  echo "DONE:light" | xcrun simctl pbcopy "$UDID"
+                  echo "appearance -> light"
+                  ;;
+              esac
+            done
+          ) &
+          WATCH=$!
+          wait $TPID || true
+          kill $WATCH 2>/dev/null || true
+          pkill -f "tail -f test.log" 2>/dev/null || true
+          ls -la shots/
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: |
+            shots/*.png
+            test.log
+          retention-days: 30

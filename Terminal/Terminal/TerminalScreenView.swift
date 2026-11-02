@@ -47,6 +47,7 @@ struct TerminalScreenView: View {
                 modifiers: bar?.modifiers
             )
             .ignoresSafeArea(.container, edges: .bottom)
+            .accessibilityIdentifier("terminalSurface")
 
             if !snippets.snippets.isEmpty {
                 SnippetBar(session: session)

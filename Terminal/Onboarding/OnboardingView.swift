@@ -49,6 +49,7 @@ struct OnboardingView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .tint(.terminalAccent)
+                    .accessibilityIdentifier("connectButton")
                     .disabled(!valid)
                     .padding(.horizontal, 24)
 

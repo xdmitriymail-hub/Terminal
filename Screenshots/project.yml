@@ -1,0 +1,16 @@
+name: Shots
+options:
+  bundleIdPrefix: com.terminal
+
+targets:
+  Shots:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Shots
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: "NO"
+        TARGETED_DEVICE_FAMILY: "1"

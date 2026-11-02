@@ -67,6 +67,7 @@ struct HostsListView: View {
                     } label: {
                         Image(systemName: "gearshape")
                     }
+                    .accessibilityIdentifier("settingsButton")
                     Button {
                         Haptics.tap()
                         showAdd = true

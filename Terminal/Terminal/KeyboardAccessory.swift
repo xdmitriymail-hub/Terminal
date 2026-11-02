@@ -56,6 +56,7 @@ final class KeyboardAccessoryView: UIInputView {
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 46), inputViewStyle: .keyboard)
+        accessibilityIdentifier = "keyboardAccessory"
         modifiers.onChange = { [weak self] in self?.syncModifiers() }
         build()
     }

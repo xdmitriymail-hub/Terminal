@@ -80,6 +80,7 @@ private struct FileBrowserContent: View {
             content
         }
         .background(Color.terminalSurface.ignoresSafeArea())
+        .accessibilityIdentifier("filesBrowser")
         .navigationTitle(vm.profile.displayName)
         .navigationBarTitleDisplayMode(.inline)
         .searchable(
