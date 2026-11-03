@@ -61,22 +61,7 @@ struct HostsListView: View {
             }
         }
         .background(Color(uiColor: .systemBackground))
-        .background {
-            // The pending session's state stream drives navigation:
-            // push on .online, retire on .failed, wait out a password
-            // prompt in between.
-            if let pending = pendingConnect {
-                Color.clear
-                    .onReceive(pending.$state) { handlePendingState($0) }
-                    .onReceive(engine.$awaitingPasswordIDs) { ids in
-                        guard let pending = pendingConnect,
-                              pending.state == .failed,
-                              !ids.contains(pending.id) else { return }
-                        pendingConnect = nil
-                        engine.closeSession(pending)
-                    }
-            }
-        }
+        .background { pendingObserver }
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Search")
         .navigationDestination(item: pushedSessionID) { _ in
@@ -135,6 +120,24 @@ struct HostsListView: View {
             get: { deleting != nil },
             set: { if !$0 { deleting = nil } }
         )
+    }
+
+    /// The pending session's state stream drives navigation: push on
+    /// .online, retire on .failed, wait out a password prompt in
+    /// between — and a dismissed prompt retires it too.
+    @ViewBuilder
+    private var pendingObserver: some View {
+        if let pending = pendingConnect {
+            Color.clear
+                .onReceive(pending.$state) { handlePendingState($0) }
+                .onReceive(engine.$awaitingPasswordIDs) { ids in
+                    guard let pending = pendingConnect,
+                          pending.state == .failed,
+                          !ids.contains(pending.id) else { return }
+                    pendingConnect = nil
+                    engine.closeSession(pending)
+                }
+        }
     }
 
     // MARK: - Rows

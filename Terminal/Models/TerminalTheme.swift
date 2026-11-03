@@ -3,10 +3,10 @@ import SwiftTerm
 
 struct TerminalTheme: Identifiable, Hashable {
     let id: String
-    let background: Color
-    let foreground: Color
-    let cursor: Color
-    let selection: Color
+    let background: SwiftUI.Color
+    let foreground: SwiftUI.Color
+    let cursor: SwiftUI.Color
+    let selection: SwiftUI.Color
 
     var uiBackground: UIColor { UIColor(background) }
     var uiForeground: UIColor { UIColor(foreground) }

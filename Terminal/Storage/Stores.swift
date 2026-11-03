@@ -374,8 +374,9 @@ final class KeysStore: ObservableObject {
             guard let outerType = try? reader.readText(),
                   outerType == parts[0],
                   let inner = try? reader.readString(),
-                  reader.remaining == 0,
-                  let innerType = try? SSHWireReader(inner).readText(),
+                  reader.remaining == 0 else { continue }
+            var innerReader = SSHWireReader(inner)
+            guard let innerType = try? innerReader.readText(),
                   innerType == parts[0] else { continue }
             repaired[i].publicKeyOpenSSH = "\(parts[0]) \(inner.base64EncodedString())"
             changed = true
