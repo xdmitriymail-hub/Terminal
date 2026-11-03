@@ -6,7 +6,6 @@ import SwiftUI
 struct TerminalScreenView: View {
     @ObservedObject var session: TerminalSession
     @EnvironmentObject var settings: SettingsStore
-    @EnvironmentObject var snippets: SnippetsStore
     @EnvironmentObject var engine: SessionEngine
     @Environment(\.colorScheme) private var colorScheme
     var isActive = true
@@ -60,15 +59,10 @@ struct TerminalScreenView: View {
         }
         .toolbarBackground(.hidden, for: .navigationBar)
         .safeAreaInset(edge: .top, spacing: 0) {
-            VStack(spacing: 8) {
-                // Always visible — the bar carries the "+" affordance,
-                // hiding it made snippets undiscoverable when empty.
-                SnippetBar(session: session)
-                if showsStatus {
-                    statusBadge
-                }
+            if showsStatus {
+                statusBadge
+                    .animation(.spring(duration: 0.3), value: session.state)
             }
-            .animation(.spring(duration: 0.3), value: session.state)
         }
         .onChange(of: session.state) { _, new in
             if new == .online { Haptics.connected() }

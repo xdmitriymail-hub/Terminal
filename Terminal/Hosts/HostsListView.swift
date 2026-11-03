@@ -9,6 +9,7 @@ struct HostsListView: View {
 
     @EnvironmentObject var profiles: ProfilesStore
     @EnvironmentObject var engine: SessionEngine
+    @ObservedObject private var presence = ServerPresence.shared
     @Environment(\.dismiss) private var dismiss
 
     @State private var query = ""
@@ -65,6 +66,9 @@ struct HostsListView: View {
         .background { pendingObserver }
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Search")
+        .task(id: presenceKey) {
+            presence.refresh(profiles.profiles)
+        }
         .sheet(isPresented: $showAdd) { AddServerView() }
         .sheet(item: $editing) { AddServerView(profile: $0) }
         .sheet(isPresented: $showSettings) { SettingsView() }
@@ -141,15 +145,10 @@ struct HostsListView: View {
                         .font(.body.weight(.medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text(subtitle(profile))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    identityLine(profile)
                 }
 
                 Spacer(minLength: 8)
-
-                statusText(profile)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -212,33 +211,52 @@ struct HostsListView: View {
         }
     }
 
-    /// "root · Ubuntu 24.04" — identity line, never the raw endpoint.
-    private func subtitle(_ profile: ServerProfile) -> String {
-        [profile.username, profile.osName]
+    /// "root, ubuntu, online" — the last word is whether the machine
+    /// answers, colored, and it is not the state of a terminal tab.
+    private func identityLine(_ profile: ServerProfile) -> some View {
+        let head = [profile.username, profile.osID]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
-            .joined(separator: " · ")
+            .joined(separator: ", ")
+        let up = serverUp(profile)
+        return HStack(spacing: 0) {
+            if !head.isEmpty {
+                Text(head)
+                    .foregroundStyle(.secondary)
+            }
+            if let up {
+                if !head.isEmpty {
+                    Text(", ")
+                        .foregroundStyle(.secondary)
+                }
+                Group {
+                    if up {
+                        Text("Online")
+                    } else {
+                        Text("Offline")
+                    }
+                }
+                .foregroundStyle(up ? Color.green : Color.red)
+            }
+        }
+        .font(.subheadline)
+        .lineLimit(1)
     }
 
-    /// OS-family glyph: distro monogram where SF Symbols has no logo,
-    /// system symbols where it does, plain rack for undetected hosts.
-    @ViewBuilder
-    private func osGlyph(_ profile: ServerProfile) -> some View {
-        switch profile.osID {
-        case "darwin", "macos", "ios": Image(systemName: "applelogo")
-        case "windows", "mingw64_nt", "cygwin_nt", "msys_nt": Image(systemName: "desktopcomputer")
-        case "freebsd", "openbsd", "netbsd": Image(systemName: "internaldrive")
-        case "alpine": Image(systemName: "mountain.2.fill")
-        case "arch", "archarm", "manjaro": Image(systemName: "triangle.fill")
-        case "openwrt", "ddwrt": Image(systemName: "wifi.router")
-        case "kali": Image(systemName: "shield.lefthalf.filled")
-        case nil: Image(systemName: "server.rack")
-        default:
-            // Every other distro gets its initial — a distinct badge
-            // per OS without fake logos.
-            Text(String(profile.osID?.prefix(1) ?? "?").uppercased())
-                .font(.system(size: 15, weight: .bold, design: .rounded))
+    /// A live shell proves the host is up. Otherwise the TCP probe.
+    private func serverUp(_ profile: ServerProfile) -> Bool? {
+        if let live = liveSession(for: profile), live.state == .online {
+            return true
         }
+        return presence.online[profile.id]
+    }
+
+    private var presenceKey: String {
+        profiles.profiles.map { "\($0.id.uuidString):\($0.host):\($0.port)" }.joined(separator: "|")
+    }
+
+    private func osGlyph(_ profile: ServerProfile) -> some View {
+        OSMark(osID: profile.osID)
     }
 
     /// Icon tile; the connect/reconnect states wrap it in a spinning
@@ -254,30 +272,6 @@ struct HostsListView: View {
                live.state == .connecting || live.state == .reconnecting {
                 ConnectRing()
             }
-        }
-    }
-
-    /// Textual status — green for up, red for down, quiet gray for
-    /// everything transitional or untouched.
-    @ViewBuilder
-    private func statusText(_ profile: ServerProfile) -> some View {
-        if let live = liveSession(for: profile) {
-            SessionProbe(session: live) { s in
-                switch s.state {
-                case .online:
-                    Text("Online").foregroundStyle(.green)
-                case .connecting:
-                    Text("Connecting").foregroundStyle(.secondary)
-                case .reconnecting:
-                    Text("Reconnecting").foregroundStyle(.secondary)
-                case .failed:
-                    Text("Error").foregroundStyle(.red)
-                case .offline:
-                    Text("Offline").foregroundStyle(.red.opacity(0.85))
-                }
-            }
-        } else {
-            EmptyView()
         }
     }
 
@@ -391,16 +385,7 @@ private struct PendingWatcher: View {
     }
 }
 
-/// Re-renders whenever the observed session publishes — list rows
-/// don't own the session, they borrow its live state.
-private struct SessionProbe<Content: View>: View {
-    @ObservedObject var session: TerminalSession
-    @ViewBuilder var content: (TerminalSession) -> Content
-
-    var body: some View { content(session) }
-}
-
-/// Spinning accent arc around a server icon while its handshake runs.
+/// Watches a pending session and reports state transitions plus the
 private struct ConnectRing: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var spinning = false

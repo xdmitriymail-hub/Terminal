@@ -24,6 +24,11 @@ struct RootView: View {
     @State private var clipboardQueue: [ClipboardRequest] = []
     @State private var showServers = false
     @State private var showSettings = false
+    @State private var showCommands = false
+    /// The trust button already answered. The alert then sets
+    /// isPresented to false, and that second call must not decline
+    /// the next server waiting in the queue.
+    @State private var hostKeyAnsweredByButton = false
     @ObservedObject private var transferManager = TransferManager.shared
     @EnvironmentObject private var appState: AppState
 
@@ -93,6 +98,21 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showCommands) {
+            if let session = activeSession {
+                NavigationStack {
+                    SnippetBar(session: session)
+                        .navigationTitle("Snippets")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { showCommands = false }
+                            }
+                        }
+                }
+                .presentationDetents([.height(200)])
+            }
         }
         .confirmationDialog(
             "Allow Clipboard Write",
@@ -226,6 +246,11 @@ struct RootView: View {
                     } label: {
                         Label("Reconnect", systemImage: "arrow.clockwise")
                     }
+                    Button {
+                        showCommands = true
+                    } label: {
+                        Label("Snippets", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    }
                     Divider()
                 }
                 Button {
@@ -273,7 +298,14 @@ struct RootView: View {
     private var hostKeyPromptPresented: Binding<Bool> {
         Binding(
             get: { pendingHostKey != nil },
-            set: { if !$0 { resolveHostKey(false) } }
+            set: { presented in
+                guard !presented else { return }
+                if hostKeyAnsweredByButton {
+                    hostKeyAnsweredByButton = false
+                    return
+                }
+                resolveHostKey(false, fromButton: false)
+            }
         )
     }
 
@@ -334,7 +366,8 @@ struct RootView: View {
         }
     }
 
-    private func resolveHostKey(_ allow: Bool) {
+    private func resolveHostKey(_ allow: Bool, fromButton: Bool = true) {
+        if fromButton { hostKeyAnsweredByButton = true }
         guard let (_, cont) = hostKeyQueue.first else {
             pendingHostKey = nil
             hostKeyPromptActive = false

@@ -38,6 +38,10 @@ final class TerminalSession: ObservableObject, Identifiable {
     @Published var title: String
 
     private var shell: ShellChannel?
+    /// Set the moment the PTY reports it ended, before any await.
+    /// `exit` closes the channel and sshd then closes the socket; the
+    /// socket callback must not schedule a reconnect in that window.
+    private var shellEnding = false
     private var consumeTask: Task<Void, Never>?
     private var connectTask: Task<Void, Never>?
     /// Chained write+resize queue — bare Tasks can be scheduled out of
@@ -378,6 +382,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         consumeTask?.cancel()
         consumeTask = nil
         modifiers.reset()
+        shellEnding = false
     }
 
     /// A failed attempt only publishes when it is still the current
@@ -460,13 +465,15 @@ final class TerminalSession: ObservableObject, Identifiable {
     private func shellClosed(_ shell: ShellChannel, error: Error?, gen: Int) async {
         guard !isTerminated, gen == connectGeneration, shell === self.shell else { return }
         self.shell = nil
-        if error != nil {
-            lastCloseReason = .transportLost
+        // Before the await: a non-zero `exit` arrives as CommandFailed,
+        // and a zero `exit` often arrives as "channel already closed"
+        // because the remote hung up first. Neither is a dropped link.
+        shellEnding = true
+        let transportUp = await connection.isConnected
+        if Self.endedByRemoteShell(error, transportUp: transportUp) {
+            lastCloseReason = .remoteExit
         } else {
-            // Clean EOF: the remote shell exited, or the transport died
-            // and took the channel silently — the liveness check splits
-            // the two. Only the dead-transport case may retry.
-            lastCloseReason = await connection.isConnected ? .remoteExit : .transportLost
+            lastCloseReason = .transportLost
         }
         switch lastCloseReason {
         case .remoteExit:
@@ -526,9 +533,12 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     /// The transport dropped under a healthy-looking session — the
-    /// pooled connection noticed before the channel did.
+    /// pooled connection noticed before the channel did. A shell that
+    /// is already ending (`exit`) must not be revived by that notice:
+    /// sshd often drops the socket right after the shell channel, and
+    /// that callback would otherwise race the exit into a reconnect.
     func noteTransportLost() {
-        guard state == .online, !isTerminated else { return }
+        guard state == .online, !isTerminated, !shellEnding else { return }
         lastCloseReason = .transportLost
         scheduleRetry()
     }
@@ -843,6 +853,21 @@ final class TerminalSession: ObservableObject, Identifiable {
         title = profile.displayName
         guard newConnection !== self.connection else { return }
         self.connection = newConnection
+    }
+
+    /// The PTY ended because the remote process exited, not because the
+    /// socket died. Citadel reports a non-zero status (`exit` after a
+    /// failed command, tmux leaving) as `CommandFailed`, and a clean
+    /// exit often surfaces as "channel already closed" once sshd hangs
+    /// up the session channel. The transport is still up in both cases.
+    private static func endedByRemoteShell(_ error: Error?, transportUp: Bool) -> Bool {
+        if error == nil { return transportUp }
+        if error is SSHClient.CommandFailed { return true }
+        // Any other channel teardown while the SSH connection is still
+        // up is the remote process leaving. A reset socket (IOError)
+        // is the drop that may reconnect.
+        if !transportUp || error is IOError { return false }
+        return true
     }
 
     /// One short human phrase per failure class — never raw error text.

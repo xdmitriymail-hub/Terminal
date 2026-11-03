@@ -27,7 +27,11 @@ final class AppState: ObservableObject {
         }
         Haptics.setEnabled(settings.settings.haptics)
         keepAlive.setEnabled(settings.settings.keepAlive)
-        keys.removeOrphanedSecrets()
+        // A locked or corrupt keys file loads as an empty list. Sweeping
+        // then would delete every private key in the Keychain.
+        if !keys.storageBlocked {
+            keys.removeOrphanedSecrets()
+        }
     }
 
     /// Backgrounding re-arms the lock when the policy is on — the app

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// Remote file browser for one profile. Pushed (or sheeted) inside a
@@ -27,6 +28,7 @@ private struct FileBrowserContent: View {
     @State private var newFolderName = ""
     @State private var showImporter = false
     @State private var showTransfers = false
+    @State private var selected: Set<String> = []
     @State private var overwritePrompt: PendingUpload?
     @State private var exportFile: ExportItem?
 
@@ -65,8 +67,12 @@ private struct FileBrowserContent: View {
                 DocumentExportPicker(url: item.url)
                     .ignoresSafeArea()
             }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
-                handleImport(result)
+            .sheet(isPresented: $showImporter) {
+                UploadDocumentPicker { urls in
+                    showImporter = false
+                    handleImports(urls)
+                }
+                .ignoresSafeArea()
             }
             .alert("New Folder", isPresented: $showNewFolder) {
                 TextField("Name", text: $newFolderName)
@@ -121,6 +127,7 @@ private struct FileBrowserContent: View {
         .toolbar { toolbarContent }
         .task { await vm.open() }
         .onDisappear { vm.park() }
+        .onChange(of: vm.path) { _, _ in selected.removeAll() }
         .onChange(of: showTransfers) { _, shown in
             // Pick up freshly uploaded files when the queue sheet closes.
             if !shown { Task { await vm.reload() } }
@@ -252,7 +259,11 @@ private struct FileBrowserContent: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            if file.isDirectory {
+            if selected.contains(file.path), !file.isDirectory {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color.terminalAccent)
+                    .accessibilityHidden(true)
+            } else if file.isDirectory {
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
@@ -340,6 +351,14 @@ private struct FileBrowserContent: View {
             )
         }
         ToolbarItem(placement: .topBarTrailing) {
+            if let file = selectedFile {
+                Button("Open") {
+                    Haptics.tap()
+                    preview = file
+                }
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Button {
                 Haptics.tap()
                 showImporter = true
@@ -372,24 +391,38 @@ private struct FileBrowserContent: View {
 
     // MARK: - Actions
 
+    private var selectedFile: RemoteFile? {
+        let hits = vm.visibleFiles.filter { selected.contains($0.path) && !$0.isDirectory }
+        return hits.count == 1 ? hits[0] : nil
+    }
+
     private func tap(_ file: RemoteFile) {
         if file.isSymlink {
-            // Listings flag links, not targets — stat() decides.
             Haptics.tap()
             Task {
                 guard let resolved = await vm.resolve(file) else { return }
                 if resolved.isDirectory {
+                    selected.removeAll()
                     await vm.navigate(resolved)
                 } else {
-                    preview = resolved
+                    toggleSelection(resolved.path)
                 }
             }
         } else if file.isDirectory {
             Haptics.select()
+            selected.removeAll()
             Task { await vm.navigate(file) }
         } else {
-            Haptics.tap()
-            preview = file
+            toggleSelection(file.path)
+        }
+    }
+
+    private func toggleSelection(_ path: String) {
+        Haptics.select()
+        if selected.contains(path) {
+            selected.remove(path)
+        } else {
+            selected.insert(path)
         }
     }
 
@@ -421,37 +454,28 @@ private struct FileBrowserContent: View {
         }
     }
 
-    private func handleImport(_ result: Result<URL, Error>) {
-        guard case .success(let url) = result else {
-            // A cancelled pick returns .failure too — only surface real
-            // errors, not the user backing out of the picker.
-            if case .failure(let error) = result,
-               (error as NSError).code != NSUserCancelledError {
-                vm.error = String(localized: "Couldn't open that file")
-                Haptics.failed()
-            }
-            return
-        }
+    private func handleImports(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
         Task {
             guard let svc = try? await vm.service() else {
                 vm.error = String(localized: "Couldn't upload")
                 Haptics.failed()
                 return
             }
-            let remote = vm.remotePath(for: url.lastPathComponent)
-            do {
-                if try await svc.exists(atPath: remote) {
-                    overwritePrompt = PendingUpload(local: url, remotePath: remote, svc: svc)
+            for url in urls {
+                let remote = vm.remotePath(for: url.lastPathComponent)
+                do {
+                    if try await svc.exists(atPath: remote) {
+                        overwritePrompt = PendingUpload(local: url, remotePath: remote, svc: svc)
+                        return
+                    }
+                } catch {
+                    vm.error = String(localized: "Couldn't check the server")
+                    Haptics.failed()
                     return
                 }
-            } catch {
-                // "Does it exist?" failed for a real reason (permission,
-                // network) — don't silently treat that as a clear path.
-                vm.error = String(localized: "Couldn't check the server")
-                Haptics.failed()
-                return
+                await startUpload(local: url, remotePath: remote, svc: svc)
             }
-            await startUpload(local: url, remotePath: remote, svc: svc)
         }
     }
 
@@ -679,6 +703,35 @@ private struct PermissionsSheet: View {
         .tint(Color.terminalAccent)
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
+    }
+}
+
+/// System picker for an upload. `.item` matches every file, `asCopy`
+/// keeps a readable copy, and the Open button is the system's own.
+private struct UploadDocumentPicker: UIViewControllerRepresentable {
+    var onPick: ([URL]) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        picker.allowsMultipleSelection = true
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPick: onPick)
+    }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: ([URL]) -> Void
+        init(onPick: @escaping ([URL]) -> Void) { self.onPick = onPick }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onPick(urls)
+        }
     }
 }
 

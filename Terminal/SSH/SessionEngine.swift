@@ -495,15 +495,10 @@ final class SessionEngine: ObservableObject {
         return sessions.contains { $0.profile.id == profileID && passwordQueue.contains($0.id) }
     }
 
-    /// Real transport probe for every pooled connection: a remote no-op
-    /// proves auth + channels still work. Dead transports are dropped so
-    /// the next channel request re-handshakes lazily — but only after
-    /// TWO consecutive failed probes: a single timed-out `true` exec on
-    /// a healthy-but-slow session must never kick the reconnect loop.
-    /// Connections mid-handshake or waiting on a prompt are skipped, and
-    /// a transport with no live session is never probed at all — an exec
-    /// channel every 25s is real traffic, so only connections actually
-    /// feeding a tab earn the check; the rest re-handshake lazily.
+    /// A connection that is no longer up is dropped so the next channel
+    /// re-handshakes. A live shell is not probed with `true`: that exec
+    /// times out on a slow host and used to disconnect a session the
+    /// user was still typing in.
     private func probeAllConnections() async {
         for (profileID, conn) in connections {
             guard await !conn.isConnecting,
@@ -513,16 +508,8 @@ final class SessionEngine: ObservableObject {
                 await conn.markDisconnected()
                 continue
             }
-            guard sessions.contains(where: { $0.connection === conn && $0.isLiveConsumer }) else { continue }
-            if await conn.probe() {
-                probeFailures[profileID] = nil
-                continue
-            }
-            let failures = (probeFailures[profileID] ?? 0) + 1
-            probeFailures[profileID] = failures
-            guard failures >= 2 else { continue }
-            probeFailures[profileID] = nil
-            await conn.markDisconnected()
+            // A live shell is the liveness signal. An extra `true` that
+            // times out must not tear the session down.
         }
     }
 
