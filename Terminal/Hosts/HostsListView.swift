@@ -129,15 +129,14 @@ struct HostsListView: View {
     @ViewBuilder
     private var pendingObserver: some View {
         if let pending = pendingConnect {
-            Color.clear
-                .onReceive(pending.$state) { handlePendingState($0) }
-                .onReceive(engine.$awaitingPasswordIDs) { ids in
-                    guard let pending = pendingConnect,
-                          pending.state == .failed,
-                          !ids.contains(pending.id) else { return }
-                    pendingConnect = nil
-                    engine.closeSession(pending)
-                }
+            PendingWatcher(session: pending, engine: engine) {
+                handlePendingState($0)
+            } onPromptDismissed: { session in
+                guard pendingConnect?.id == session.id,
+                      session.state == .failed else { return }
+                pendingConnect = nil
+                engine.closeSession(session)
+            }
         }
     }
 
@@ -361,6 +360,23 @@ struct HostsListView: View {
         engine.sessions.first { $0.profile.id == profile.id }
     }
 
+}
+
+/// Watches a pending session and reports state transitions plus the
+/// moment its password prompt is dismissed without an answer.
+private struct PendingWatcher: View {
+    @ObservedObject var session: TerminalSession
+    let engine: SessionEngine
+    let onState: (TerminalSession.State) -> Void
+    let onPromptDismissed: (TerminalSession) -> Void
+
+    var body: some View {
+        Color.clear
+            .onChange(of: session.state) { _, new in onState(new) }
+            .onReceive(engine.$awaitingPasswordIDs) { ids in
+                if !ids.contains(session.id) { onPromptDismissed(session) }
+            }
+    }
 }
 
 /// Re-renders whenever the observed session publishes — list rows
