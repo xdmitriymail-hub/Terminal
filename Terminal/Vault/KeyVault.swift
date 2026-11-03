@@ -427,7 +427,7 @@ struct SecureEnclaveAuthDelegate: NIOSSHClientUserAuthenticationDelegate {
         }
         nextChallengePromise.succeed(NIOSSHUserAuthenticationOffer(
             username: username,
-            serviceName: "",
+            serviceName: "ssh-connection",
             offer: .privateKey(.init(privateKey: .init(secureEnclaveP256Key: key)))
         ))
     }

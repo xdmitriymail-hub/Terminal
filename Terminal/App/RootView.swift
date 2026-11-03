@@ -29,10 +29,13 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            if engine.sessions.isEmpty {
-                HostsListView()
-            } else {
+            if engine.sessions.contains(where: { $0.reachedOnline }) {
                 workspace
+            } else {
+                // A still-connecting tab never flashes a blank
+                // terminal — the list stays up, its icon ring spins,
+                // and only a reached-online session switches over.
+                HostsListView()
             }
             // Inline, not a cover — host-key and password prompts must
             // be able to appear above it during the first connect.
@@ -296,6 +299,9 @@ struct RootView: View {
             errorMessage = String(localized: "Couldn't reach the keychain")
             return
         }
+        // The prompt clears inside connect() once the session is
+        // already past .failed — clearing here would retire the
+        // pending attempt underneath its own retry.
         session.reconnect()
     }
 

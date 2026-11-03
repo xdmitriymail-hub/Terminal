@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import Citadel
+import NIO
 
 /// One terminal tab: PTY lifecycle, output routing to the terminal view,
 /// transparent reconnect and tmux reattach.
@@ -18,12 +19,22 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     let id = UUID()
-    let profile: ServerProfile
-    private let connection: SSHConnection
+    /// @Published so title/rows follow an edited profile in place —
+    /// the next reconnect then dials the new endpoint too.
+    @Published private(set) var profile: ServerProfile
+    private(set) var connection: SSHConnection
     private let settings: SettingsStore
     weak var engine: SessionEngine?
 
-    @Published private(set) var state: State = .connecting
+    @Published private(set) var state: State = .connecting {
+        didSet {
+            // The engine republishes so `engine`-level observers
+            // (keepalive activity, host rows) see flips that happen
+            // inside a session — the array itself only emits on
+            // add/remove.
+            if oldValue != state { engine?.sessionActivityDidChange() }
+        }
+    }
     @Published var title: String
 
     private var shell: ShellChannel?
@@ -36,7 +47,6 @@ final class TerminalSession: ObservableObject, Identifiable {
     private var cols = 80
     private var rows = 24
     private var hadLiveSession = false
-    private var tmuxChecked = false
     private var isTerminated = false
     /// Bumped per connect attempt; every async result is gated on it so
     /// a stale/cancelled attempt can never publish into the current one.
@@ -45,6 +55,13 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// Auto-reconnect backoff state — cancellable, capped.
     private var retryTask: Task<Void, Never>?
     private var retryAttempt = 0
+    /// Budget exhausted — auto paths stop retrying until the user
+    /// explicitly reconnects; otherwise a dead host gets hammered
+    /// with handshakes and alert spam forever.
+    private var retryBudgetSpent = false
+    /// tmux attach was issued on the live channel — terminate can then
+    /// retire the server-side session instead of leaking `term-*`.
+    private var tmuxAttached = false
     /// Set when auth itself was declined (Face ID cancelled, keychain
     /// prompt denied) — an auth gate, not transport death: auto-retry
     /// never fires on it, but an explicit reconnect() recovers cleanly.
@@ -77,9 +94,23 @@ final class TerminalSession: ObservableObject, Identifiable {
     private static let maxBytesPerFlush = 256 * 1024
     private static let flushInterval: Duration = .milliseconds(8)
 
+    /// The view that currently owns the output handler — a second
+    /// surface may briefly attach (a pushed sheet) and must not let
+    /// its detach silence the real workspace renderer.
+    private var outputOwner: ObjectIdentifier?
+    /// Bumped on detach so views observing this session re-evaluate
+    /// and the visible surface re-claims output — otherwise a
+    /// dismissed sheet would leave the workspace terminal frozen.
+    @Published private(set) var outputEpoch = 0
+
+    func isOutputOwner(_ owner: AnyObject) -> Bool {
+        outputOwner == ObjectIdentifier(owner)
+    }
+
     /// Attach the renderer: installs the handler and replays anything
     /// that arrived while no view was bound.
-    func attachOutput(_ handler: @escaping @MainActor (ArraySlice<UInt8>) -> Void) {
+    func attachOutput(owner: AnyObject, _ handler: @escaping @MainActor (ArraySlice<UInt8>) -> Void) {
+        outputOwner = ObjectIdentifier(owner)
         onOutput = handler
         guard !pendingOutput.isEmpty else { return }
         feedBuffer.append(pendingOutput)
@@ -87,8 +118,11 @@ final class TerminalSession: ObservableObject, Identifiable {
         scheduleFlush()
     }
 
-    func detachOutput() {
+    func detachOutput(owner: AnyObject) {
+        guard outputOwner == ObjectIdentifier(owner) else { return }
+        outputOwner = nil
         onOutput = nil
+        outputEpoch += 1
         // Bytes already coalesced for the next frame are *older* than
         // whatever lands in pendingOutput next — merge them in front,
         // not behind, so the renderer never sees reordered output.
@@ -102,32 +136,45 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     /// Bytes of our own internal commands still awaiting their PTY
-    /// echo — swallowed in deliverOutput so wiring like the tmux
-    /// attach never surfaces on screen or in scrollback.
-    private var pendingEcho = Data()
+    /// echo — a queue, one entry per silent send, so a chunk carrying
+    /// the first echo plus unrelated bytes can't leak the command:
+    /// matched bytes are excised, everything else passes through.
+    private var pendingEchoes: [Data] = []
     private var echoDeadline = Date.distantPast
 
     /// Queues output for the next frame batch; with no view attached it
     /// lands in the bounded tail buffer instead. Internal-command echo
-    /// is stripped first — anything not matching the pending echo falls
-    /// through untouched, so real output is never lost.
+    /// is stripped first — prompt/MOTD bytes around it pass through
+    /// untouched, so real output is never lost.
     private func deliverOutput(_ data: Data) {
         var data = data
-        if !pendingEcho.isEmpty {
-            if Date() > echoDeadline { pendingEcho.removeAll() }
-            if !pendingEcho.isEmpty {
-                var dropped = 0
-                while dropped < data.count, let expected = pendingEcho.first,
-                      data[data.index(data.startIndex, offsetBy: dropped)] == expected {
-                    pendingEcho.removeFirst()
-                    dropped += 1
+        if !pendingEchoes.isEmpty {
+            if Date() > echoDeadline { pendingEchoes.removeAll() }
+            while !pendingEchoes.isEmpty, let echo = pendingEchoes.first {
+                if let range = data.range(of: echo) {
+                    // Whole echo in one chunk — excise just it and try
+                    // the next expectation against what's left.
+                    data.replaceSubrange(range, with: [])
+                    pendingEchoes.removeFirst()
+                    continue
                 }
-                // A mismatch means the echo finished differently than
-                // expected — drop the stale expectation, keep the bytes.
-                if !pendingEcho.isEmpty, dropped < data.count { pendingEcho.removeAll() }
-                data.removeFirst(dropped)
-                guard !data.isEmpty else { return }
+                // Echo hasn't arrived yet (motd/prompt pass first), or
+                // it is split at this chunk's tail: real bytes flow
+                // through, the held tail continues matching the next
+                // chunk. The expectation only expires on the deadline.
+                let maxTail = min(data.count, echo.count - 1)
+                var tail = maxTail
+                while tail > 0 {
+                    if data.suffix(tail) == echo.prefix(tail) { break }
+                    tail -= 1
+                }
+                if tail > 0 {
+                    data.removeLast(tail)
+                    pendingEchoes[0].removeFirst(tail)
+                }
+                break
             }
+            guard !data.isEmpty else { return }
         }
         if onOutput != nil {
             feedBuffer.append(data)
@@ -217,10 +264,17 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// backoff — a foreground/path trigger should fire that wait now.
     /// A remote `exit` — offline by choice — is never auto-restarted.
     var wantsReconnect: Bool {
-        hadLiveSession && !isTerminated
+        hadLiveSession && !isTerminated && !retryBudgetSpent
             && ((state.isFailed && !authGated)
                 || (state == .reconnecting && retryTask != nil)
                 || (state == .offline && lastCloseReason == .transportLost))
+    }
+
+    /// This tab is doing network work — the pooled connection behind it
+    /// earns health probes; idle, dead or failed tabs re-handshake
+    /// lazily instead of running an exec every 25s.
+    var isLiveConsumer: Bool {
+        !isTerminated && (state == .online || state == .connecting || state == .reconnecting)
     }
 
     /// Remote `exit` ended the shell — "session ended", distinct from
@@ -260,6 +314,10 @@ final class TerminalSession: ObservableObject, Identifiable {
     private func connect(gen: Int) async {
         guard !isTerminated else { return }
         state = hadLiveSession ? .reconnecting : .connecting
+        // A pending password ask retires the moment the retry leaves
+        // .failed — cleared here, not by the prompt itself, so pending
+        // watchers see a live reconnect instead of an abandoned one.
+        engine?.clearPasswordPrompt(for: self)
         do {
             let shell = try await connection.openShell(cols: cols, rows: rows)
             guard !isTerminated, !Task.isCancelled, gen == connectGeneration else {
@@ -278,36 +336,48 @@ final class TerminalSession: ObservableObject, Identifiable {
             }
             hadLiveSession = true
             retryAttempt = 0
-            state = .online
+            retryBudgetSpent = false
             engine?.clearPasswordPrompt(for: self)
+            // One exec round-trip learns tmux + OS — before the tab
+            // goes live and before the attach is written, so nothing
+            // typed meanwhile glues onto our wiring.
+            let probe = await engine?.probeHost(self)
+            guard !isTerminated, !Task.isCancelled, gen == connectGeneration else {
+                await shell.close()
+                return
+            }
             consume(shell, gen: gen)
             // The new channel gets the current size even if the PTY
             // request already carried it — resizes that failed on the
             // dead channel are replayed here.
             enqueueResize()
             sendShellOverride(gen: gen)
-            await reattachIfNeeded(gen: gen)
-            // Row icon/label learn the real OS — once, off the hot path.
-            if profile.osID == nil {
-                Task { await engine?.learnOS(for: self) }
-            }
+            attachTmux(gen: gen, available: probe?.hasTmux == true)
+            reachedOnline = true
+            state = .online
         } catch {
             handleConnectFailure(error, gen: gen)
         }
     }
 
+    /// First successful online — the workspace only shows tabs that
+    /// actually reached a shell; a still-connecting attempt keeps the
+    /// server list (and its icon ring) on screen instead of flashing
+    /// an empty terminal.
+    private(set) var reachedOnline = false
+
     /// Input queue, consume loop and sticky modifiers belong to the
     /// shell they were captured against — a replacement starts clean.
-    /// The once-per-channel tmux check re-arms here too: every fresh
-    /// shell — manual reconnect or auto-retry alike — gets its
-    /// reattach, and the old `term-*` session is resumed, not leaked.
+    /// Every fresh shell — manual reconnect or auto-retry alike — runs
+    /// the remote probe again; the tmux flag itself is NOT reset here:
+    /// the server-side `term-*` session survives a transport drop and
+    /// terminating the tab still has to retire it.
     private func resetForNewShell() {
         sendChain?.cancel()
         sendChain = nil
         consumeTask?.cancel()
         consumeTask = nil
         modifiers.reset()
-        tmuxChecked = false
     }
 
     /// A failed attempt only publishes when it is still the current
@@ -321,17 +391,33 @@ final class TerminalSession: ObservableObject, Identifiable {
         // resumable through an explicit reconnect.
         if case KeyVaultError.biometricDenied = error {
             authGated = true
-            state = .failed("Authentication cancelled")
+            state = .failed(String(localized: "Authentication cancelled"))
             return
         }
-        // Missing password isn't a failure worth an alert — ask the
-        // user for it, then retry through the same session. The prompt
-        // queues BEFORE the failed state publishes, so UI watching the
-        // state sees the outstanding ask and doesn't tear the session
-        // down underneath the prompt.
-        if case KeyVaultError.keyMaterialMissing = error, case .password = profile.auth {
+        // Missing or rejected password asks again — the prompt queues
+        // BEFORE the failed state publishes, so UI watching the state
+        // sees the outstanding ask and doesn't tear the session down
+        // underneath the prompt.
+        let authRejected = (error as? SSHClientError) == .allAuthenticationOptionsFailed
+        if case .password = profile.auth,
+           case KeyVaultError.keyMaterialMissing = error {
             engine?.authNeeded(self)
             state = .failed(Self.describe(error))
+            return
+        }
+        if authRejected, case .password = profile.auth {
+            // The stored password was tried and refused — keeping it
+            // would make every retry fail identically while the prompt
+            // pretends to be fresh. Drop it so the ask is genuine.
+            _ = Keychain.delete(tag: "password.\(profile.id.uuidString)")
+            engine?.authNeeded(self)
+            state = .failed(String(localized: "Access denied"))
+            return
+        }
+        if authRejected {
+            let alreadyFailed = state.isFailed
+            state = .failed(String(localized: "Access denied"))
+            if !alreadyFailed { engine?.reportError(String(localized: "Access denied")) }
             return
         }
         // Mid-retry-cycle failure: keep cycling quietly while attempts
@@ -341,8 +427,13 @@ final class TerminalSession: ObservableObject, Identifiable {
             scheduleRetry()
             return
         }
+        // Failed-states dedupe their own alert — a retry cycle that
+        // keeps landing in .failed doesn't re-alert every round.
+        let alreadyFailed = state.isFailed
         state = .failed(Self.describe(error))
-        engine?.reportError(Self.describe(error))
+        if !alreadyFailed {
+            engine?.reportError(Self.describe(error))
+        }
     }
 
     private func consume(_ shell: ShellChannel, gen: Int) {
@@ -378,7 +469,12 @@ final class TerminalSession: ObservableObject, Identifiable {
             lastCloseReason = await connection.isConnected ? .remoteExit : .transportLost
         }
         switch lastCloseReason {
-        case .remoteExit, .userClosed:
+        case .remoteExit:
+            // The remote shell ended (exit/logout): the tab's job is
+            // done — retire it rather than freeze a dead screen.
+            state = .offline
+            engine?.closeSession(self)
+        case .userClosed:
             state = .offline
         case .transportLost:
             scheduleRetry()
@@ -396,8 +492,12 @@ final class TerminalSession: ObservableObject, Identifiable {
             return
         }
         guard retryAttempt < Self.maxRetryAttempts else {
-            state = .failed("Connection lost")
-            engine?.reportError("Couldn't reconnect")
+            retryBudgetSpent = true
+            let alreadyFailed = state.isFailed
+            state = .failed(String(localized: "Connection lost"))
+            if !alreadyFailed {
+                engine?.reportError(String(localized: "Couldn't reconnect"))
+            }
             return
         }
         retryTask?.cancel()
@@ -434,42 +534,49 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     /// Each tab keeps its own tmux session (named per tab), so parallel
-    /// tabs never fight over one attach. Detection is cached on the
-    /// engine; the check itself re-runs after every reconnect.
-    private func reattachIfNeeded(gen: Int) async {
-        guard profile.autoTmux, settings.settings.autoTmux, !tmuxChecked,
-              gen == connectGeneration else { return }
-        tmuxChecked = true
-        let available = await engine?.hasTmux(on: self) ?? false
-        // No sleep-as-synchronization: the channel-open handshake was
-        // already awaited inside openShell, and the generation check is
-        // what keeps a stale attempt from typing into a new shell.
-        guard available, !isTerminated, gen == connectGeneration, !Task.isCancelled else { return }
+    /// tabs never fight over one attach. The command is a plain `;`
+    /// chain — no `||` after attach, or a normal `exit` would respawn
+    /// a fresh tmux forever. `status off` lands before the attach, so
+    /// the green status bar never flashes into view.
+    private func attachTmux(gen: Int, available: Bool) {
+        guard profile.autoTmux, settings.settings.autoTmux, available,
+              !isTerminated, gen == connectGeneration, !Task.isCancelled else { return }
         let name = "term-\(id.uuidString)"
-        // `;` escaped so the shell passes it to tmux verbatim — tmux
-        // chains `set-option` onto the just-attached session, keeping
-        // its green status bar out of the clean terminal view.
-        sendSilently("tmux new-session -A -s \(Self.shQuote(name)) \\; set-option status off 2>/dev/null || tmux new-session -s \(Self.shQuote(name)) \\; set-option status off\r")
+        tmuxAttached = true
+        // `exec` before attach: when the tmux session ends (exit from
+        // the last pane) there is no login shell left to fall back to —
+        // the channel closes, and the tab retires into the server list
+        // instead of reviving a bare prompt behind the user's back.
+        sendSilently("tmux new-session -d -s \(Self.shQuote(name)) 2>/dev/null; tmux set-option -t \(Self.shQuote(name)) status off; exec tmux attach -t \(Self.shQuote(name))\r")
     }
 
-    /// Probes the remote once per profile (cached on the engine) — exec
-    /// channels are cheap, repeating `command -v` per tab is not.
-    func detectTmux() async -> Bool {
-        guard let path = try? await connection.execute("command -v tmux || true") else {
-            return false
+    /// What one exec round-trip learns about the remote. `hasTmux` is
+    /// nil when the probe itself failed — a timed-out exec must not be
+    /// cached as "no tmux" and orphan the server-side session forever.
+    struct RemoteProbe: Sendable {
+        var hasTmux: Bool?
+        var osID: String?
+        var osName: String?
+    }
+
+    /// Combined remote probe — tmux path, kernel, distro identity in a
+    /// single exec. Marker letters keep the output parseable even when
+    /// one probe prints nothing.
+    func probeRemote() async -> RemoteProbe {
+        let probe = "printf 'T>'; command -v tmux || true; printf 'K>'; uname -s; printf 'D>'; . /etc/os-release 2>/dev/null; printf '%s|%s' \"${ID:-}\" \"${PRETTY_NAME:-}\""
+        guard let raw = try? await connection.execute(probe) else {
+            return RemoteProbe()
         }
-        return !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// One-shot OS probe for the server-row icon/label: `uname -s`
-    /// for the kernel, os-release for the distro identity. Fails
-    /// silently — a missing OS never blocks the shell.
-    func detectOS() async -> (id: String, name: String)? {
-        let probe = "uname -s; . /etc/os-release 2>/dev/null; echo \"${ID:-} ${PRETTY_NAME:-}\""
-        guard let raw = try? await connection.execute(probe) else { return nil }
-        let lines = raw.split(separator: "\n").map(String.init)
-        let kernel = (lines.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !kernel.isEmpty else { return nil }
+        func field(_ marker: String, until next: String?) -> String {
+            guard let start = raw.range(of: marker) else { return "" }
+            let tail = raw[start.upperBound...]
+            let end = next.flatMap { tail.range(of: $0)?.lowerBound } ?? tail.endIndex
+            return String(tail[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var out = RemoteProbe()
+        out.hasTmux = !field("T>", until: "K>").isEmpty
+        let kernel = field("K>", until: "D>").lowercased()
+        guard !kernel.isEmpty else { return out }
         var id = kernel
         var name: String
         switch kernel {
@@ -480,42 +587,34 @@ final class TerminalSession: ObservableObject, Identifiable {
         case "linux": name = "Linux"
         default: name = kernel.capitalized
         }
-        if kernel == "linux", lines.count > 1 {
-            let fields = lines[1].split(separator: " ", maxSplits: 1)
-            if let distro = fields.first, !distro.isEmpty {
-                id = String(distro).lowercased()
-                if fields.count > 1, !fields[1].isEmpty {
-                    name = String(fields[1])
-                } else {
-                    name = distro.capitalized
-                }
+        if kernel == "linux" {
+            let distro = field("D>", until: nil).split(separator: "|", maxSplits: 1)
+            if let d = distro.first, !d.isEmpty {
+                id = String(d).lowercased()
+                name = distro.count > 1 && !distro[1].isEmpty ? String(distro[1]) : d.capitalized
             }
         }
-        return (id, name)
+        out.osID = id
+        out.osName = name
+        return out
     }
 
     /// `exec` replaces the login shell with the configured override.
-    /// Path and arguments are separated and the path is POSIX-quoted —
-    /// an override with spaces or metacharacters is never interpolated
-    /// as shell program text.
+    /// Path AND every argument are POSIX-quoted individually — a field
+    /// like `zsh -l` must reach the remote as exactly two arguments,
+    /// never interpolated into shell metacharacters or re-splits.
     private func sendShellOverride(gen: Int) {
         let override = settings.settings.shellOverride.trimmingCharacters(in: .whitespaces)
         guard !override.isEmpty, gen == connectGeneration, !isTerminated else { return }
-        let (path, args) = Self.splitPathAndArgs(override)
-        guard !path.isEmpty else { return }
-        let suffix = args.isEmpty ? "" : " \(args)"
-        sendSilently("exec \(Self.shQuote(path))\(suffix)\r")
+        let parts = Self.shellWords(override)
+        guard !parts.isEmpty else { return }
+        sendSilently("exec \(parts.map(Self.shQuote).joined(separator: " "))\r")
     }
 
-    /// First whitespace run splits the executable path from its
-    /// argument tail, which passes through verbatim.
-    private static func splitPathAndArgs(_ command: String) -> (path: String, args: String) {
-        guard let range = command.rangeOfCharacter(from: .whitespaces) else {
-            return (command, "")
-        }
-        let path = String(command[command.startIndex..<range.lowerBound])
-        let args = String(command[range.upperBound...]).trimmingCharacters(in: .whitespaces)
-        return (path, args)
+    /// Whitespace-split into words — an override is "path plus flags",
+    /// each token quoted separately downstream.
+    private static func shellWords(_ command: String) -> [String] {
+        command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
     }
 
     /// POSIX single-quote: the only metachar that survives is ' itself,
@@ -570,7 +669,7 @@ final class TerminalSession: ObservableObject, Identifiable {
             // A CR echoes back as CRLF on a cooked pty.
             if b == 0x0D { echo.append(0x0A) }
         }
-        pendingEcho.append(echo)
+        pendingEchoes.append(echo)
         echoDeadline = Date().addingTimeInterval(3)
         send(bytes[...])
     }
@@ -614,14 +713,31 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     /// CR is what a terminal sends for Return; CRLF collapses to a
-    /// single CR so pasted text doesn't double-submit.
+    /// single CR so pasted text doesn't double-submit. Inside a
+    /// bracketed paste (`ESC[200~`…`ESC[201~`) bytes pass through
+    /// untouched — the mode exists precisely so the application reads
+    /// the text literally, and rewriting LF to CR there prints ^M in
+    /// every pasted line.
     static func crNormalize(_ bytes: [UInt8]) -> [UInt8] {
         var out = [UInt8]()
         out.reserveCapacity(bytes.count)
         var i = 0
+        var inPaste = false
         while i < bytes.count {
             let byte = bytes[i]
-            if byte == 0x0D {
+            // ESC [ 2 0 x ~ — the bracketed-paste envelope.
+            if byte == 0x1B, i + 5 < bytes.count,
+               bytes[i + 1] == 0x5B, bytes[i + 2] == 0x32,
+               bytes[i + 3] == 0x30, bytes[i + 5] == 0x7E,
+               bytes[i + 4] == 0x30 || bytes[i + 4] == 0x31 {
+                inPaste = bytes[i + 4] == 0x30
+                out.append(contentsOf: bytes[i...i + 5])
+                i += 6
+                continue
+            }
+            if inPaste {
+                out.append(byte)
+            } else if byte == 0x0D {
                 out.append(0x0D)
                 if i + 1 < bytes.count, bytes[i + 1] == 0x0A { i += 1 }
             } else if byte == 0x0A {
@@ -667,7 +783,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         guard state != .connecting else { return }
         // A pending backoff counts as offline-ish: an explicit trigger
         // (network path restored, app foregrounded) fires it now.
-        guard state == .offline || (state.isFailed && !authGated) || (state == .reconnecting && retryTask != nil) else { return }
+        guard state == .offline || (state.isFailed && !authGated && !retryBudgetSpent) || (state == .reconnecting && retryTask != nil) else { return }
         retryTask?.cancel()
         retryTask = nil
         runConnect()
@@ -677,6 +793,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         retryTask?.cancel()
         retryTask = nil
         retryAttempt = 0
+        retryBudgetSpent = false
         runConnect()
     }
 
@@ -697,29 +814,86 @@ final class TerminalSession: ObservableObject, Identifiable {
         consumeTask = nil
         if let shell {
             self.shell = nil
-            Task { await shell.close() }
+            if tmuxAttached {
+                // Retire the server-side `term-*` session this tab
+                // owned — closing the channel alone leaks it on the
+                // host forever. Serial before the close: a dead
+                // transport throws fast and close still runs.
+                tmuxAttached = false
+                let name = "term-\(id.uuidString)"
+                Task {
+                    try? await connection.execute("tmux kill-session -t \(Self.shQuote(name))")
+                    await shell.close()
+                }
+            } else {
+                Task { await shell.close() }
+            }
         }
         engine?.sessionTerminated(self)
         state = .offline
+    }
+
+    /// The profile was edited under a live tab: identity follows the
+    /// new record and the pooled transport is swapped, so the next
+    /// channel dials the new host/port/user/key instead of the stale
+    /// endpoint. The engine drops the old transport — its close event
+    /// drives any reconnect through the usual path.
+    func retarget(profile: ServerProfile, connection newConnection: SSHConnection) {
+        self.profile = profile
+        title = profile.displayName
+        guard newConnection !== self.connection else { return }
+        self.connection = newConnection
     }
 
     /// One short human phrase per failure class — never raw error text.
     static func describe(_ error: Error) -> String {
         switch error {
         case is UntrustedHostKey:
-            return "Couldn't verify this server"
-        case is SSHClient.CommandFailed:
-            return "Couldn't open a session"
+            return String(localized: "Couldn't verify this server")
         case KeyVaultError.biometricDenied:
-            return "Unlock cancelled"
+            return String(localized: "Unlock cancelled")
+        case KeyVaultError.keyMaterialMissing:
+            return String(localized: "Password required")
         case is CancellationError:
-            return "Couldn't connect"
+            return String(localized: "Couldn't connect")
+        case SSHClientError.allAuthenticationOptionsFailed:
+            return String(localized: "Access denied")
+        case SSHClientError.unsupportedPasswordAuthentication,
+             SSHClientError.unsupportedPrivateKeyAuthentication,
+             SSHClientError.unsupportedHostBasedAuthentication:
+            return String(localized: "Sign-in method rejected")
+        case SSHClientError.channelCreationFailed,
+             CitadelError.channelCreationFailed, CitadelError.channelFailure:
+            return String(localized: "Couldn't open a session")
+        case is AuthenticationFailed:
+            return String(localized: "Access denied")
         default:
-            // Surface the real reason — refused vs timed out vs auth —
-            // instead of a generic banner that hides everything.
-            let desc = error.localizedDescription
-            return desc.isEmpty ? "Couldn't connect" : desc
+            break
         }
+        if let ioError = error as? IOError {
+            switch ioError.errnoCode {
+            case ECONNREFUSED:
+                return String(localized: "Connection refused")
+            case ETIMEDOUT:
+                return String(localized: "Connection timed out")
+            case ENETUNREACH, EHOSTUNREACH:
+                return String(localized: "No route to host")
+            case ECONNRESET, ECONNABORTED, EPIPE:
+                return String(localized: "Connection lost")
+            default:
+                break
+            }
+        }
+        if let channelError = error as? ChannelError {
+            if case .connectTimeout = channelError {
+                return String(localized: "Connection timed out")
+            }
+            return String(localized: "Connection lost")
+        }
+        if error is SocketAddressError.UnknownHost {
+            return String(localized: "Couldn't resolve host")
+        }
+        return String(localized: "Couldn't connect")
     }
 }
 

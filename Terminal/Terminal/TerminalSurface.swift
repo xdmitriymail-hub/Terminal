@@ -43,6 +43,12 @@ struct TerminalSurface: UIViewRepresentable {
         // claimed its closures since this view last attached.
         Self.wireAccessory(view, coordinator: context.coordinator)
         if isActive {
+            // A sibling surface (a pushed sheet) may have stolen the
+            // output handler — the visible workspace view claims it
+            // back so the tab never freezes behind a dismissed sheet.
+            if !session.isOutputOwner(view) {
+                context.coordinator.claimOutput(on: view)
+            }
             // This tab resigned only because it was hidden — switching
             // back brings the keyboard up again without a second tap.
             if context.coordinator.wasFirstResponderOnDeactivate {
@@ -118,9 +124,7 @@ struct TerminalSurface: UIViewRepresentable {
             self.session = session
             self.view = view
             self.modifiers = modifiers
-            session.attachOutput { [weak view] bytes in
-                view?.feed(byteArray: bytes)
-            }
+            claimOutput(on: view)
             // Hide/cursor-mode target THIS terminal — re-wired on every
             // attach because the cached bar may point at an old view.
             TerminalSurface.wireAccessory(view, coordinator: self)
@@ -130,8 +134,18 @@ struct TerminalSurface: UIViewRepresentable {
                 .forEach { $0.keyboardDismissMode = .interactive }
         }
 
+        /// The view takes ownership of the output handler — any bytes
+        /// buffered while a sibling surface held it replay on claim.
+        func claimOutput(on view: TerminalView) {
+            session?.attachOutput(owner: view) { [weak view] bytes in
+                view?.feed(byteArray: bytes)
+            }
+        }
+
         func detach() {
-            session?.detachOutput()
+            if let view {
+                session?.detachOutput(owner: view)
+            }
             session = nil
         }
 

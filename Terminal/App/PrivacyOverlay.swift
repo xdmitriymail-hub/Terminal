@@ -66,26 +66,71 @@ final class PrivacyOverlay {
     }
 }
 
-/// Curtain content: lock glyph always, an explicit Unlock button while
-/// biometry-locked so a dismissed Face ID prompt is recoverable.
+/// Curtain content: a large glass lock emblem always — an explicit
+/// Unlock button only while biometry-locked so a dismissed Face ID
+/// prompt stays recoverable.
 private struct PrivacyCurtainView: View {
     let locked: Bool
     let onUnlock: () -> Void
 
+    @State private var ringGlow = false
+
     var body: some View {
         ZStack {
             Color(uiColor: .systemBackground).ignoresSafeArea()
-            VStack(spacing: 22) {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 28, weight: .light))
-                    .foregroundStyle(.tertiary)
-                if locked {
-                    Button("Unlock", action: onUnlock)
-                        .font(.body.weight(.medium))
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 12)
-                        .background(.ultraThinMaterial, in: Capsule())
+            VStack(spacing: 40) {
+                ZStack {
+                    // Soft accent halo breathing behind the emblem —
+                    // motion instead of decoration.
+                    Circle()
+                        .fill(Color.terminalAccent.opacity(0.14))
+                        .frame(width: 156, height: 156)
+                        .blur(radius: 26)
+                        .scaleEffect(ringGlow ? 1.12 : 0.96)
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 112, height: 112)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(0.35),
+                                            Color.white.opacity(0.08)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    ),
+                                    lineWidth: 1
+                                )
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 24, y: 10)
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 44, weight: .regular))
+                        .foregroundStyle(.primary.opacity(0.92))
+                        .symbolRenderingMode(.hierarchical)
                 }
+                if locked {
+                    Button(action: onUnlock) {
+                        Label("Unlock", systemImage: "faceid")
+                            .font(.body.weight(.semibold))
+                            .padding(.horizontal, 30)
+                            .padding(.vertical, 14)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.primary)
+                    .accessibilityHint(String(localized: "Uses Face ID or passcode"))
+                }
+            }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
+                ringGlow = true
             }
         }
     }

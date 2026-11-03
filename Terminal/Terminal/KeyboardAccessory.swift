@@ -129,39 +129,46 @@ final class KeyboardAccessoryView: UIInputView {
             stack.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor, constant: -12)
         ])
 
-        stack.addArrangedSubview(key("esc") { [weak self] in self?.emit([0x1B]) })
-        let ctrl = key("ctrl") { [weak self] in self?.modifiers.toggleCtrl(); Haptics.select() }
+        stack.addArrangedSubview(key("esc", spoken: String(localized: "Escape")) { [weak self] in self?.emit([0x1B]) })
+        let ctrl = key("ctrl", spoken: String(localized: "Control")) { [weak self] in self?.modifiers.toggleCtrl(); Haptics.select() }
         ctrlButton = ctrl
         stack.addArrangedSubview(ctrl)
-        let alt = key("alt") { [weak self] in self?.modifiers.toggleAlt(); Haptics.select() }
+        let alt = key("alt", spoken: String(localized: "Option")) { [weak self] in self?.modifiers.toggleAlt(); Haptics.select() }
         altButton = alt
         stack.addArrangedSubview(alt)
-        stack.addArrangedSubview(key("tab", glyph: "arrow.right.to.line") { [weak self] in self?.emit([0x09]) })
+        stack.addArrangedSubview(key("tab", glyph: "arrow.right.to.line", spoken: String(localized: "Tab")) { [weak self] in self?.emit([0x09]) })
 
         stack.addArrangedSubview(sep())
 
-        stack.addArrangedSubview(key("left", glyph: "chevron.left") { [weak self] in self?.emitArrow("D") })
-        stack.addArrangedSubview(key("down", glyph: "chevron.down") { [weak self] in self?.emitArrow("B") })
-        stack.addArrangedSubview(key("up", glyph: "chevron.up") { [weak self] in self?.emitArrow("A") })
-        stack.addArrangedSubview(key("right", glyph: "chevron.right") { [weak self] in self?.emitArrow("C") })
+        stack.addArrangedSubview(key("left", glyph: "chevron.left", spoken: String(localized: "Arrow left")) { [weak self] in self?.emitArrow("D") })
+        stack.addArrangedSubview(key("down", glyph: "chevron.down", spoken: String(localized: "Arrow down")) { [weak self] in self?.emitArrow("B") })
+        stack.addArrangedSubview(key("up", glyph: "chevron.up", spoken: String(localized: "Arrow up")) { [weak self] in self?.emitArrow("A") })
+        stack.addArrangedSubview(key("right", glyph: "chevron.right", spoken: String(localized: "Arrow right")) { [weak self] in self?.emitArrow("C") })
 
         stack.addArrangedSubview(sep())
 
+        let spokenSymbols: [String: String] = [
+            "`": String(localized: "Backtick"), "|": String(localized: "Pipe"),
+            "/": String(localized: "Slash"), "-": String(localized: "Minus"),
+            "~": String(localized: "Tilde"), "_": String(localized: "Underscore"),
+            "=": String(localized: "Equals"), "&": String(localized: "Ampersand"),
+            "$": String(localized: "Dollar sign")
+        ]
         for symbol in ["`", "|", "/", "-", "~", "_", "=", "&", "$"] {
-            stack.addArrangedSubview(key(symbol) { [weak self] in self?.emitString(symbol) })
+            stack.addArrangedSubview(key(symbol, spoken: spokenSymbols[symbol]) { [weak self] in self?.emitString(symbol) })
         }
 
         stack.addArrangedSubview(sep())
 
-        stack.addArrangedSubview(key("home", glyph: "arrowtriangle.left.fill") { [weak self] in self?.emitArrow("H") })
-        stack.addArrangedSubview(key("end", glyph: "arrowtriangle.right.fill") { [weak self] in self?.emitArrow("F") })
+        stack.addArrangedSubview(key("home", glyph: "arrowtriangle.left.fill", spoken: String(localized: "Home")) { [weak self] in self?.emitArrow("H") })
+        stack.addArrangedSubview(key("end", glyph: "arrowtriangle.right.fill", spoken: String(localized: "End")) { [weak self] in self?.emitArrow("F") })
 
         // Hide lives in a fixed trailing zone — on iPhone the scrollable
         // keys would otherwise push it off-screen.
         let trailing = UIView()
         trailing.translatesAutoresizingMaskIntoConstraints = false
         blur.contentView.addSubview(trailing)
-        let hide = key("hide", glyph: "keyboard.chevron.compact.down") { [weak self] in
+        let hide = key("hide", glyph: "keyboard.chevron.compact.down", spoken: String(localized: "Hide keyboard")) { [weak self] in
             self?.onHide()
         }
         trailing.addSubview(hide)
@@ -176,9 +183,12 @@ final class KeyboardAccessoryView: UIInputView {
         ])
     }
 
-    private func key(_ title: String, glyph: String? = nil, action: @escaping () -> Void) -> KeyButton {
+    private func key(_ title: String, glyph: String? = nil, spoken: String? = nil, action: @escaping () -> Void) -> KeyButton {
         let button = KeyButton(title: title, glyph: glyph)
         button.onTap = action
+        button.isAccessibilityElement = true
+        button.accessibilityTraits.insert(.button)
+        button.accessibilityLabel = spoken ?? title
         return button
     }
 

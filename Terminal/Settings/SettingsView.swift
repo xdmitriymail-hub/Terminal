@@ -5,6 +5,9 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var keepAlive: KeepAliveEngine
+    /// A refused write reverts the control silently — the alert is how
+    /// the user learns the setting didn't stick.
+    @State private var saveFailed = false
 
     var body: some View {
         NavigationStack {
@@ -115,6 +118,15 @@ struct SettingsView: View {
             .tint(.terminalAccent)
             .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: settings.storageError != nil) { _, hasError in
+            if hasError {
+                saveFailed = true
+                Haptics.failed()
+            }
+        }
+        .alert(String(localized: "Couldn't save settings"), isPresented: $saveFailed) {
+            Button("OK") {}
+        }
         }
     }
 

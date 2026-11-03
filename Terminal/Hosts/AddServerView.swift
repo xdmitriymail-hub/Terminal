@@ -96,7 +96,7 @@ struct AddServerView: View {
                     }
                     Toggle("Resume session", isOn: $draft.autoTmux)
                 } header: {
-                    Text("More")
+                    Text("Connection")
                 } footer: {
                     Text("“Connect through” opens this server via another saved server — for machines that aren't reachable directly.")
                 }
@@ -146,10 +146,17 @@ struct AddServerView: View {
     private func save() {
         draft.host = draft.host.trimmingCharacters(in: .whitespaces)
         draft.username = draft.username.trimmingCharacters(in: .whitespaces)
-        if !(1...65535).contains(draft.port) { draft.port = 22 }
 
         guard valid else {
             Haptics.failed()
+            return
+        }
+        // Never silently rewrite a port: 0 or 70000 saved as 22 looks
+        // fine in the list and then refuses every connect for a reason
+        // nobody can see.
+        guard (1...65535).contains(draft.port) else {
+            Haptics.failed()
+            errorMessage = String(localized: "Port must be 1–65535")
             return
         }
 
@@ -186,8 +193,10 @@ struct AddServerView: View {
         }
 
         // Edited host/auth must not keep a stale pooled transport or a
-        // warm SFTP channel pointing at the old endpoint.
-        engine.invalidateConnection(for: draft.id)
+        // warm SFTP channel pointing at the old endpoint — open tabs
+        // retarget the freshly built connection instead of dialling
+        // the values they were opened with.
+        engine.retargetSessions(for: draft)
         FileBrowserViewModel.evictWarm(profileID: draft.id)
         Haptics.tap()
         dismiss()

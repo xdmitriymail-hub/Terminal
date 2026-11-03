@@ -97,24 +97,33 @@ private final class NIOToNWBridge: ChannelInboundHandler, Sendable {
 
     // MARK: - NIO → NW
 
+    /// Cap on remote bytes held while the SOCKS gate is closed — a
+    /// chatty target can't fill memory inside the 15s handshake window.
+    private static let maxEarlyInbound = 256 * 1024
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let bytes = Data(unwrapInboundIn(data).readableBytesView)
         guard !bytes.isEmpty else {
             context.read()
             return
         }
-        let gateClosed = state.withLockedValue { s -> Bool in
+        let overflow = state.withLockedValue { s -> Bool? in
             guard s.started else {
                 s.earlyInbound.append(bytes)
-                return true
+                return s.earlyInbound.count > Self.maxEarlyInbound ? true : nil
             }
             return false
         }
-        if gateClosed {
+        switch overflow {
+        case .some(true):
+            // Flood before the reply: the handshake fails and the
+            // client gets a refusal, not a memory sinkhole.
+            teardown(context.channel)
+        case .some(false):
+            sendToNW(bytes, on: context.channel)
+        case nil:
             context.read()
-            return
         }
-        sendToNW(bytes, on: context.channel)
     }
 
     /// The next inbound chunk is only read once this send completes —
@@ -414,7 +423,7 @@ final class PortForwardService: ObservableObject {
             }
             active.append(entry)
         } catch {
-            runtime[rule.id] = .failed("Port \(rule.listenPort) unavailable")
+            runtime[rule.id] = .failed(String(localized: "Port \(rule.listenPort) unavailable"))
         }
     }
 
@@ -455,7 +464,7 @@ final class PortForwardService: ObservableObject {
                 case .ready:
                     self.setRuntime(rule.id, .ready, entryGen: entryGen)
                 case .failed:
-                    self.setRuntime(rule.id, .failed("Port \(rule.listenPort) unavailable"), entryGen: entryGen)
+                    self.setRuntime(rule.id, .failed(String(localized: "Port \(rule.listenPort) unavailable")), entryGen: entryGen)
                 default:
                     break
                 }
@@ -551,7 +560,7 @@ final class PortForwardService: ObservableObject {
                 } catch {
                     guard !Task.isCancelled else { break }
                     let attempt = await attempts.next()
-                    self.setRuntime(rule.id, .failed("Remote forward failed"), entryGen: entryGen)
+                    self.setRuntime(rule.id, .failed(String(localized: "Remote forward failed")), entryGen: entryGen)
                     guard attempt < Self.maxRemoteRetries else { return }
                     try? await Task.sleep(for: Self.remoteBackoff(attempt))
                 }

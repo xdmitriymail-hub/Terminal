@@ -206,7 +206,7 @@ final class FileBrowserViewModel: ObservableObject {
                 if path.isEmpty { path = home ?? "/" }
             } catch {
                 isLoading = false
-                fail("Couldn't connect")
+                fail(String(localized: "Couldn't connect"))
                 return
             }
         }
@@ -257,7 +257,7 @@ final class FileBrowserViewModel: ObservableObject {
                 } catch {}
             }
             guard gen == generation else { return }
-            fail("Couldn't load folder")
+            fail(String(localized: "Couldn't load folder"))
         }
     }
 
@@ -304,7 +304,7 @@ final class FileBrowserViewModel: ObservableObject {
                 commit(gen, newPath, list)
             } catch {
                 guard gen == generation else { return }
-                fail("Couldn't open folder")
+                fail(String(localized: "Couldn't open folder"))
             }
         }
     }
@@ -329,7 +329,7 @@ final class FileBrowserViewModel: ObservableObject {
             Haptics.tap()
             await load()
         } catch {
-            fail("Couldn't create folder")
+            fail(String(localized: "Couldn't create folder"))
         }
     }
 
@@ -342,7 +342,7 @@ final class FileBrowserViewModel: ObservableObject {
             }
             Haptics.tap()
         } catch {
-            fail("Couldn't delete")
+            fail(String(localized: "Couldn't delete"))
         }
     }
 
@@ -351,7 +351,7 @@ final class FileBrowserViewModel: ObservableObject {
         guard let sftp else { return }
         // Rejections surface — a silent no-op looks like success.
         guard isValidName(name), name != file.name else {
-            fail("Couldn't rename")
+            fail(String(localized: "Couldn't rename"))
             return
         }
         let directory = (file.path as NSString).deletingLastPathComponent
@@ -361,7 +361,7 @@ final class FileBrowserViewModel: ObservableObject {
             Haptics.tap()
             await load()
         } catch {
-            fail("Couldn't rename")
+            fail(String(localized: "Couldn't rename"))
         }
     }
 
@@ -372,7 +372,7 @@ final class FileBrowserViewModel: ObservableObject {
             Haptics.tap()
             await load()
         } catch {
-            fail("Couldn't change permissions")
+            fail(String(localized: "Couldn't change permissions"))
         }
     }
 

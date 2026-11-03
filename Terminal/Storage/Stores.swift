@@ -427,10 +427,13 @@ final class KeysStore: ObservableObject {
 
     /// Sweeps Keychain material whose tag no stored key references —
     /// e.g. secrets orphaned by a crash between metadata delete and
-    /// secret delete. Returns the count removed.
+    /// secret delete. Returns the count removed. Never runs against an
+    /// unreadable store: a corrupt `keys` file decodes to an empty
+    /// list, and sweeping from it would wipe every stored secret.
     @discardableResult
     func removeOrphanedSecrets() -> Int {
-        KeyVault.removeOrphanedSecrets(keeping: Set(keys.flatMap {
+        guard storageError == nil, unrecoverableData == nil else { return 0 }
+        return KeyVault.removeOrphanedSecrets(keeping: Set(keys.flatMap {
             [$0.keychainTag, $0.passphraseTag]
         }))
     }

@@ -9,12 +9,12 @@ struct HostsListView: View {
 
     @EnvironmentObject var profiles: ProfilesStore
     @EnvironmentObject var engine: SessionEngine
+    @Environment(\.dismiss) private var dismiss
 
     @State private var query = ""
     @State private var showAdd = false
     @State private var showSettings = false
     @State private var editing: ServerProfile?
-    @State private var session: TerminalSession?
     @State private var pendingConnect: TerminalSession?
     @State private var errorMessage: String?
     @State private var deleting: ServerProfile?
@@ -65,11 +65,6 @@ struct HostsListView: View {
         .background { pendingObserver }
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Search")
-        .navigationDestination(item: pushedSessionID) { _ in
-            if let session {
-                TerminalScreenView(session: session)
-            }
-        }
         .sheet(isPresented: $showAdd) { AddServerView() }
         .sheet(item: $editing) { AddServerView(profile: $0) }
         .sheet(isPresented: $showSettings) { SettingsView() }
@@ -99,14 +94,6 @@ struct HostsListView: View {
                 }
             }
         }
-    }
-
-    /// TerminalSession isn't Hashable, so the push is keyed by its id.
-    private var pushedSessionID: Binding<UUID?> {
-        Binding(
-            get: { session?.id },
-            set: { if $0 == nil { session = nil } }
-        )
     }
 
     private var errorPresented: Binding<Bool> {
@@ -299,9 +286,22 @@ struct HostsListView: View {
     /// Tapping a row keeps the user in the list: the session connects
     /// in the background (ring on the icon) and only a successful
     /// handshake pushes the terminal. Failures stay here with the
-    /// session's own alert.
+    /// session's own alert. A profile that already has a live tab in
+    /// the workspace is surfaced there instead — never a second
+    /// terminal stacked on top of the first.
     private func connect(_ profile: ServerProfile) {
         Haptics.tap()
+        if let live = liveSession(for: profile) {
+            engine.activeSessionID = live.id
+            dismiss()
+            return
+        }
+        // A superseded pending connect would linger unobserved —
+        // retire it before arming the new one.
+        if let stale = pendingConnect {
+            pendingConnect = nil
+            engine.closeSession(stale)
+        }
         pendingConnect = engine.openSession(for: profile, cols: 80, rows: 24)
     }
 
@@ -310,7 +310,15 @@ struct HostsListView: View {
         switch state {
         case .online:
             pendingConnect = nil
-            session = pending
+            // Standalone: RootView swaps the list for the workspace as
+            // soon as a session reaches online — nothing to push.
+            // In the servers sheet: the new tab lives in the workspace
+            // underneath — surface it and drop the sheet instead of
+            // stacking a second terminal inside the list.
+            if embeddedInStack {
+                engine.activeSessionID = pending.id
+                dismiss()
+            }
         case .failed where engine.isAwaitingPassword(pending):
             // A password prompt is up — keep it armed: a resolved
             // prompt reconnects and still reaches .online.
@@ -318,6 +326,10 @@ struct HostsListView: View {
         case .failed:
             pendingConnect = nil
             engine.closeSession(pending)
+        case .offline:
+            // A server that drops the shell mid-setup would otherwise
+            // leave the icon ring spinning forever.
+            pendingConnect = nil
         default:
             break
         }

@@ -65,6 +65,9 @@ final class SessionEngine: ObservableObject {
     var onClipboardRequest: (@MainActor (TerminalSession, Data) -> Void)?
 
     /// tmux presence per profile — detected once, reused across tabs.
+    /// Only a *successful* probe is cached: a timed-out exec leaves the
+    /// entry empty so the next connect probes again instead of
+    /// inheriting a false "no tmux" that orphans server sessions.
     private var tmuxAvailable: [UUID: Bool] = [:]
 
     /// Consecutive probe failures per profile — one timed-out probe is
@@ -73,24 +76,27 @@ final class SessionEngine: ObservableObject {
     /// so a flapping link can't churn reconnects forever.
     private var probeFailures: [UUID: Int] = [:]
 
-    /// Detects tmux on the session's host, caching the answer per profile.
-    func hasTmux(on session: TerminalSession) async -> Bool {
-        if let cached = tmuxAvailable[session.profile.id] { return cached }
-        let found = await session.detectTmux()
-        tmuxAvailable[session.profile.id] = found
-        return found
-    }
-
-    /// Fills `osID`/`osName` on the profile after a connect — the row
-    /// icon and subtitle follow whatever the server actually runs.
-    /// Probed once; the stored value persists across launches.
-    func learnOS(for session: TerminalSession) async {
-        guard session.profile.osID == nil,
-              let detected = await session.detectOS() else { return }
-        var updated = session.profile
-        updated.osID = detected.id
-        updated.osName = detected.name
-        _ = profiles.save(updated)
+    /// One exec round-trip per connect learns tmux presence and OS
+    /// identity. The tmux answer is cached per profile (execs cost a
+    /// channel each); OS is learned once and persisted on the profile.
+    func probeHost(_ session: TerminalSession) async -> TerminalSession.RemoteProbe {
+        if let cached = tmuxAvailable[session.profile.id],
+           session.profile.osID != nil {
+            return TerminalSession.RemoteProbe(hasTmux: cached)
+        }
+        let probe = await session.probeRemote()
+        if let found = probe.hasTmux {
+            tmuxAvailable[session.profile.id] = found
+        }
+        if session.profile.osID == nil,
+           let osID = probe.osID, let osName = probe.osName {
+            var updated = session.profile
+            updated.osID = osID
+            updated.osName = osName
+            _ = profiles.save(updated)
+            session.retarget(profile: updated, connection: session.connection)
+        }
+        return probe
     }
 
     init(profiles: ProfilesStore, keys: KeysStore, knownHosts: KnownHostsStore, settings: SettingsStore) {
@@ -302,9 +308,23 @@ final class SessionEngine: ObservableObject {
         tmuxAvailable[profileID] = nil
     }
 
+    /// A saved profile reached open tabs: the stale pooled transport is
+    /// dropped first, then every session of that profile is pointed at
+    /// a freshly-built one so changed host, port, user or key apply.
+    /// The old transport's close lands after the retarget — sessions
+    /// retry through the new connection.
+    func retargetSessions(for profile: ServerProfile) {
+        invalidateConnection(for: profile.id)
+        let conn = connection(for: profile)
+        for session in sessions where session.profile.id == profile.id {
+            session.retarget(profile: profile, connection: conn)
+        }
+    }
+
     /// Drops a pooled transport (e.g. when profile secrets changed).
     func invalidateConnection(for profileID: UUID) {
         probeFailures[profileID] = nil
+        tmuxAvailable[profileID] = nil
         cancelHostKeyPrompts(profileID: profileID)
         if let service = forwardServices.removeValue(forKey: profileID) {
             Task { await service.stopAll() }
@@ -364,6 +384,14 @@ final class SessionEngine: ObservableObject {
     /// Surfaces a readable session failure as a quiet alert.
     func reportError(_ message: String) {
         onError?(message)
+    }
+
+    /// A session's state flipped: republish so `engine`-level
+    /// observers (keepalive activity sync, host-row badges) re-read —
+    /// `sessions` itself only emits when tabs come and go, not when a
+    /// live tab's state changes.
+    func sessionActivityDidChange() {
+        objectWillChange.send()
     }
 
     func closeSession(_ session: TerminalSession) {
@@ -472,8 +500,10 @@ final class SessionEngine: ObservableObject {
     /// the next channel request re-handshakes lazily — but only after
     /// TWO consecutive failed probes: a single timed-out `true` exec on
     /// a healthy-but-slow session must never kick the reconnect loop.
-    /// Connections mid-handshake or waiting on a prompt are skipped —
-    /// a probe then would only measure an unfinished connect.
+    /// Connections mid-handshake or waiting on a prompt are skipped, and
+    /// a transport with no live session is never probed at all — an exec
+    /// channel every 25s is real traffic, so only connections actually
+    /// feeding a tab earn the check; the rest re-handshake lazily.
     private func probeAllConnections() async {
         for (profileID, conn) in connections {
             guard await !conn.isConnecting,
@@ -483,6 +513,7 @@ final class SessionEngine: ObservableObject {
                 await conn.markDisconnected()
                 continue
             }
+            guard sessions.contains(where: { $0.connection === conn && $0.isLiveConsumer }) else { continue }
             if await conn.probe() {
                 probeFailures[profileID] = nil
                 continue
