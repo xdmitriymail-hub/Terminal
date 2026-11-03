@@ -133,7 +133,7 @@ struct HostsListView: View {
                 handlePendingState($0)
             } onPromptDismissed: { session in
                 guard pendingConnect?.id == session.id,
-                      session.state == .failed else { return }
+                      case .failed = session.state else { return }
                 pendingConnect = nil
                 engine.closeSession(session)
             }
