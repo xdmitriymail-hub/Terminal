@@ -145,41 +145,16 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// matched bytes are excised, everything else passes through.
     private var pendingEchoes: [Data] = []
     private var echoDeadline = Date.distantPast
+    /// Bytes of the current echo already matched, across packet boundaries.
+    private var echoHold = Data()
 
     /// Queues output for the next frame batch; with no view attached it
-    /// lands in the bounded tail buffer instead. Internal-command echo
-    /// is stripped first — prompt/MOTD bytes around it pass through
-    /// untouched, so real output is never lost.
+    /// lands in the bounded tail buffer instead. The setup command is
+    /// removed even when its echo is split across SSH packets, so a
+    /// later scroll never reveals `tmux new-session`.
     private func deliverOutput(_ data: Data) {
-        var data = data
-        if !pendingEchoes.isEmpty {
-            if Date() > echoDeadline { pendingEchoes.removeAll() }
-            while !pendingEchoes.isEmpty, let echo = pendingEchoes.first {
-                if let range = data.range(of: echo) {
-                    // Whole echo in one chunk — excise just it and try
-                    // the next expectation against what's left.
-                    data.replaceSubrange(range, with: [])
-                    pendingEchoes.removeFirst()
-                    continue
-                }
-                // Echo hasn't arrived yet (motd/prompt pass first), or
-                // it is split at this chunk's tail: real bytes flow
-                // through, the held tail continues matching the next
-                // chunk. The expectation only expires on the deadline.
-                let maxTail = min(data.count, echo.count - 1)
-                var tail = maxTail
-                while tail > 0 {
-                    if data.suffix(tail) == echo.prefix(tail) { break }
-                    tail -= 1
-                }
-                if tail > 0 {
-                    data.removeLast(tail)
-                    pendingEchoes[0].removeFirst(tail)
-                }
-                break
-            }
-            guard !data.isEmpty else { return }
-        }
+        let data = stripSetupEcho(data)
+        guard !data.isEmpty else { return }
         if onOutput != nil {
             feedBuffer.append(data)
             scheduleFlush()
@@ -187,6 +162,48 @@ final class TerminalSession: ObservableObject, Identifiable {
             pendingOutput.append(data)
             trimPendingOutput()
         }
+    }
+
+    /// Drops the setup command even when the PTY splits its echo across
+    /// packets. Unrelated bytes (the prompt, MOTD) pass through.
+    private func stripSetupEcho(_ data: Data) -> Data {
+        if !pendingEchoes.isEmpty, Date() > echoDeadline {
+            let leaked = echoHold
+            echoHold.removeAll()
+            pendingEchoes.removeAll()
+            var out = leaked
+            out.append(data)
+            return out
+        }
+        guard !pendingEchoes.isEmpty else { return data }
+        var out = Data()
+        out.reserveCapacity(data.count)
+        for byte in data {
+            guard let echo = pendingEchoes.first else {
+                out.append(byte)
+                continue
+            }
+            let matched = echoHold.count
+            let next = echo.index(echo.startIndex, offsetBy: matched)
+            if next < echo.endIndex, echo[next] == byte {
+                echoHold.append(byte)
+                if echoHold.count == echo.count {
+                    echoHold.removeAll()
+                    pendingEchoes.removeFirst()
+                }
+            } else if !echoHold.isEmpty {
+                out.append(echoHold)
+                echoHold.removeAll()
+                if let echo = pendingEchoes.first, echo.first == byte {
+                    echoHold.append(byte)
+                } else {
+                    out.append(byte)
+                }
+            } else {
+                out.append(byte)
+            }
+        }
+        return out
     }
 
     private func scheduleFlush() {
@@ -383,6 +400,8 @@ final class TerminalSession: ObservableObject, Identifiable {
         consumeTask = nil
         modifiers.reset()
         shellEnding = false
+        echoHold.removeAll()
+        pendingEchoes.removeAll()
     }
 
     /// A failed attempt only publishes when it is still the current

@@ -264,10 +264,7 @@ struct HostsListView: View {
     private func serverIcon(_ profile: ServerProfile) -> some View {
         ZStack {
             osGlyph(profile)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color.terminalAccent)
-                .frame(width: 38, height: 38)
-                .terminalGlass(cornerRadius: 11)
+                .frame(width: 36, height: 36)
             if let live = liveSession(for: profile),
                live.state == .connecting || live.state == .reconnecting {
                 ConnectRing()
@@ -398,8 +395,11 @@ private struct ConnectRing: View {
             .rotationEffect(.degrees(spinning ? 360 : 0))
             .onAppear {
                 guard !reduceMotion else { return }
-                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
-                    spinning = true
+                spinning = false
+                DispatchQueue.main.async {
+                    withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                        spinning = true
+                    }
                 }
             }
     }

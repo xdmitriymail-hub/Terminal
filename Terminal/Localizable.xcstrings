@@ -1441,6 +1441,26 @@
         }
       }
     },
+    "New command": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Новая команда"
+          }
+        }
+      }
+    },
+    "Edit command": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Изменить команду"
+          }
+        }
+      }
+    },
     "Open": {
       "localizations": {
         "ru": {

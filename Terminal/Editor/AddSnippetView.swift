@@ -48,7 +48,7 @@ struct AddSnippetView: View {
             }
             .scrollContentBackground(.hidden)
             .background(Color.terminalSurface.ignoresSafeArea())
-            .navigationTitle(existing == nil ? "New Snippet" : "Edit Snippet")
+            .navigationTitle(existing == nil ? String(localized: "New command") : String(localized: "Edit command"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

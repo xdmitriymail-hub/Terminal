@@ -8,7 +8,6 @@ struct RootView: View {
     @AppStorage("onboarding.done") private var onboardingDone = false
 
     @State private var showSessionPicker = false
-    @State private var showGrid = false
     @State private var showFilesFor: ServerProfile?
     @State private var showForwardsFor: ServerProfile?
     @State private var errorMessage: String?
@@ -52,9 +51,6 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSessionPicker) {
             SessionPickerSheet()
-        }
-        .sheet(isPresented: $showGrid) {
-            SessionGridView()
         }
         .sheet(item: $showFilesFor) { profile in
             NavigationStack {
@@ -101,17 +97,7 @@ struct RootView: View {
         }
         .sheet(isPresented: $showCommands) {
             if let session = activeSession {
-                NavigationStack {
-                    SnippetBar(session: session)
-                        .navigationTitle("Snippets")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Done") { showCommands = false }
-                            }
-                        }
-                }
-                .presentationDetents([.height(200)])
+                CommandsSheet(session: session)
             }
         }
         .confirmationDialog(
@@ -206,8 +192,7 @@ struct RootView: View {
             // under the tab bar.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 SessionTabBarView(
-                    onNewSession: { showSessionPicker = true },
-                    onShowGrid: { showGrid = true }
+                    onNewSession: { showSessionPicker = true }
                 )
                 .padding(.bottom, 4)
             }
@@ -220,14 +205,6 @@ struct RootView: View {
 
     @ToolbarContentBuilder
     private var workspaceToolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            Button {
-                showSessionPicker = true
-                Haptics.tap()
-            } label: {
-                Image(systemName: "square.grid.2x2")
-            }
-        }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 if let profile = activeProfile {

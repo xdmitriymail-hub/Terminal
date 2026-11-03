@@ -45,18 +45,6 @@ struct TerminalScreenView: View {
         // under the tab bar, and the theme color still reaches the
         // screen edges so no dark corners show around the keyboard.
         .background(activeTheme.background.ignoresSafeArea(.container))
-        .overlay(alignment: .top) {
-            // The header treatment is a plain darkening of the top
-            // edge — no color, no chrome — so the title and badges
-            // stay readable over bright terminal output.
-            LinearGradient(
-                colors: [Color.black.opacity(0.38), Color.black.opacity(0)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 88)
-            .allowsHitTesting(false)
-        }
         .toolbarBackground(.hidden, for: .navigationBar)
         .safeAreaInset(edge: .top, spacing: 0) {
             if showsStatus {

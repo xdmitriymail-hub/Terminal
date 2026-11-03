@@ -21,14 +21,14 @@ struct TerminalSurface: UIViewRepresentable {
         view.inputAccessoryView = accessory
         view.backgroundColor = theme.uiBackground
         context.coordinator.attach(session: session, view: view, modifiers: modifiers)
-        context.coordinator.appliedStyle = Coordinator.StyleSignature(fontSize: fontSize, theme: theme)
+        context.coordinator.appliedStyle = Coordinator.StyleSignature(fontSize: fontSize, themeID: theme.id)
         return view
     }
 
     func updateUIView(_ view: TerminalView, context: Context) {
         // Style diffing: re-applying identical colors/font forces a full
         // glyph re-layout — skip when nothing actually changed.
-        let signature = Coordinator.StyleSignature(fontSize: fontSize, theme: theme)
+        let signature = Coordinator.StyleSignature(fontSize: fontSize, themeID: theme.id)
         if context.coordinator.appliedStyle != signature {
             applyStyle(view)
             context.coordinator.appliedStyle = signature
@@ -77,9 +77,8 @@ struct TerminalSurface: UIViewRepresentable {
         view.selectedTextBackgroundColor = UIColor(theme.selection)
         view.selectedTextForegroundColor = theme.uiForeground
         view.backgroundColor = theme.uiBackground
-        // The ANSI palette is the theme — without it `ls` colors and
-        // TUIs keep the stock mapping regardless of the picked look.
         view.installColors(theme.ansiColors)
+        view.setNeedsDisplay()
     }
 
     /// The accessory bar outlives any single TerminalView (it's cached
@@ -108,7 +107,7 @@ struct TerminalSurface: UIViewRepresentable {
     final class Coordinator: NSObject, TerminalViewDelegate {
         struct StyleSignature: Equatable {
             let fontSize: Double
-            let theme: TerminalTheme
+            let themeID: String
         }
 
         private weak var session: TerminalSession?

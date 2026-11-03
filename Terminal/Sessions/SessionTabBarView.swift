@@ -6,11 +6,9 @@ struct SessionTabBarView: View {
     @EnvironmentObject private var engine: SessionEngine
 
     private let onNewSession: () -> Void
-    private let onShowGrid: () -> Void
 
-    init(onNewSession: @escaping () -> Void, onShowGrid: @escaping () -> Void = {}) {
+    init(onNewSession: @escaping () -> Void) {
         self.onNewSession = onNewSession
-        self.onShowGrid = onShowGrid
     }
 
     var body: some View {
@@ -33,36 +31,20 @@ struct SessionTabBarView: View {
                 }
             }
 
-            HStack(spacing: 4) {
+            HStack(spacing: 0) {
                 Button {
                     Haptics.tap()
                     onNewSession()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 32, height: 32)
-                        .background(Color.primary.opacity(0.09), in: Circle())
+                        .font(.system(size: 17, weight: .medium))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("New session")
-
-                Button {
-                    Haptics.tap()
-                    onShowGrid()
-                } label: {
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 32, height: 32)
-                        .background(Color.primary.opacity(0.09), in: Circle())
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Sessions")
             }
-            .padding(.trailing, 6)
+            .padding(.trailing, 4)
         }
         .frame(minHeight: 44)
         .terminalGlass(cornerRadius: 22)

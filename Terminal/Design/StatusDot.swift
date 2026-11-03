@@ -45,7 +45,11 @@ struct StatusDot: View {
                     : .default,
                 value: pulse
             )
-            .onAppear { pulse = animates }
+            .onAppear {
+                guard animates else { return }
+                pulse = false
+                DispatchQueue.main.async { pulse = true }
+            }
             .onChange(of: animates) { _, on in pulse = on }
             .accessibilityLabel(Text("Status"))
             .accessibilityValue(Text(state.accessibilityText))

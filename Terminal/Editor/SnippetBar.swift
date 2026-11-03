@@ -85,3 +85,66 @@ struct SnippetBar: View {
         .accessibilityLabel("Add snippet")
     }
 }
+
+/// Commands for the open session. A row sends the command.
+/// Adding one is a labeled action, not a lone glass plus.
+struct CommandsSheet: View {
+    let session: TerminalSession
+    @EnvironmentObject private var snippets: SnippetsStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var adding = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if snippets.snippets.isEmpty {
+                    VStack(spacing: 16) {
+                        Text("No snippets")
+                            .foregroundStyle(.secondary)
+                        Button("New command") { adding = true }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color.terminalAccent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(snippets.snippets) { snippet in
+                        Button {
+                            Haptics.select()
+                            session.send(snippet.autoEnter ? snippet.command + "\n" : snippet.command)
+                            dismiss()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(snippet.title)
+                                    .foregroundStyle(.primary)
+                                Text(snippet.command)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .background(Color.terminalSurface.ignoresSafeArea())
+            .navigationTitle("Snippets")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        adding = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel(String(localized: "New command"))
+                }
+            }
+            .sheet(isPresented: $adding) {
+                AddSnippetView()
+            }
+        }
+    }
+}
