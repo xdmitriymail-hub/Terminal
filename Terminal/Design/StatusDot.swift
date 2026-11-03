@@ -8,11 +8,11 @@ struct StatusDot: View {
 
         var accessibilityText: String {
             switch self {
-            case .connecting: return "Connecting"
-            case .online: return "Connected"
-            case .reconnecting: return "Reconnecting"
-            case .offline: return "Offline"
-            case .failed: return "Failed"
+            case .connecting: return String(localized: "Connecting")
+            case .online: return String(localized: "Connected")
+            case .reconnecting: return String(localized: "Reconnecting")
+            case .offline: return String(localized: "Offline")
+            case .failed: return String(localized: "Failed")
             }
         }
     }

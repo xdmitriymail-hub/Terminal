@@ -10,27 +10,18 @@ struct TerminalScreenView: View {
     @EnvironmentObject var engine: SessionEngine
     @Environment(\.colorScheme) private var colorScheme
     var isActive = true
-    private let bar: KeyboardAccessoryView?
-    private let externalAccessory: UIView?
+    /// Cached per session — a fresh bar per SwiftUI diff is what made
+    /// the keyboard flicker on every title/state change.
+    private let bar: KeyboardAccessoryView
 
-    init(session: TerminalSession, accessory: UIView? = nil, isActive: Bool = true) {
+    init(session: TerminalSession, isActive: Bool = true) {
         self.session = session
-        self.externalAccessory = accessory
         self.isActive = isActive
-        if accessory == nil {
-            let bar = KeyboardAccessoryView()
-            bar.bind(modifiers: session.modifiers)
-            bar.onSend = { [weak session] bytes in
-                session?.send(ArraySlice(bytes))
-            }
-            self.bar = bar
-        } else {
-            self.bar = nil
-        }
+        self.bar = KeyboardAccessoryView.forSession(session)
     }
 
     private var accessory: UIView? {
-        settings.settings.showKeyboardBar ? (bar ?? externalAccessory) : nil
+        settings.settings.showKeyboardBar ? bar : nil
     }
 
     /// "auto" follows the interface style; explicit ids stay pinned.
@@ -55,11 +46,24 @@ struct TerminalScreenView: View {
         // under the tab bar, and the theme color still reaches the
         // screen edges so no dark corners show around the keyboard.
         .background(activeTheme.background.ignoresSafeArea(.container))
+        .overlay(alignment: .top) {
+            // The header treatment is a plain darkening of the top
+            // edge — no color, no chrome — so the title and badges
+            // stay readable over bright terminal output.
+            LinearGradient(
+                colors: [Color.black.opacity(0.38), Color.black.opacity(0)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 88)
+            .allowsHitTesting(false)
+        }
+        .toolbarBackground(.hidden, for: .navigationBar)
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 8) {
-                if !snippets.snippets.isEmpty {
-                    SnippetBar(session: session)
-                }
+                // Always visible — the bar carries the "+" affordance,
+                // hiding it made snippets undiscoverable when empty.
+                SnippetBar(session: session)
                 if showsStatus {
                     statusBadge
                 }
@@ -83,7 +87,7 @@ struct TerminalScreenView: View {
 
     private var showsStatus: Bool {
         switch session.state {
-        case .connecting, .reconnecting, .failed: return true
+        case .connecting, .reconnecting, .failed, .offline: return true
         default: return false
         }
     }
@@ -127,6 +131,30 @@ struct TerminalScreenView: View {
                     engine.closeSession(session)
                 }
             }
+        case .offline:
+            // A remote `exit` (or a lost transport without auto-retry)
+            // used to leave a frozen tab — offer Reconnect here too.
+            badge {
+                Image(systemName: "bolt.slash")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                // Separate literals — a String ternary skips lookup.
+                if session.endedRemotely {
+                    Text("Session ended")
+                } else if session.wantsReconnect {
+                    Text("Couldn't reconnect")
+                } else {
+                    Text("Offline")
+                }
+                badgeButton("arrow.clockwise", label: "Reconnect") {
+                    Haptics.tap()
+                    session.reconnect()
+                }
+                badgeButton("xmark", label: "Close") {
+                    Haptics.tap()
+                    engine.closeSession(session)
+                }
+            }
         default:
             EmptyView()
         }
@@ -145,7 +173,7 @@ struct TerminalScreenView: View {
             .padding(.top, 2)
     }
 
-    private func badgeButton(_ glyph: String, label: String, action: @escaping () -> Void) -> some View {
+    private func badgeButton(_ glyph: String, label: LocalizedStringKey, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: glyph)
                 .font(.system(size: 11, weight: .bold))
@@ -156,7 +184,7 @@ struct TerminalScreenView: View {
                 .contentShape(Circle().inset(by: -8))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(Text(label))
+        .accessibilityLabel(label)
     }
 
 }

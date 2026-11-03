@@ -243,9 +243,12 @@ final class FileBrowserViewModel: ObservableObject {
                 return
             } catch {}
             // Folder may be gone — fall back to home before giving up.
+            // List `home` explicitly: rows must always match the path
+            // we publish, or downloads/deletes would target the new
+            // path while showing the old folder's entries.
             if let home, home != path {
                 do {
-                    let list = try await attemptList()
+                    let list = try await attemptList(at: home)
                     guard gen == generation else { return }
                     path = home
                     files = list
@@ -258,9 +261,9 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
-    private func attemptList() async throws -> [RemoteFile] {
+    private func attemptList(at target: String? = nil) async throws -> [RemoteFile] {
         let svc = try await service()
-        return sort(try await svc.list(path: path))
+        return sort(try await svc.list(path: target ?? path))
     }
 
     // MARK: - Navigation
@@ -345,7 +348,12 @@ final class FileBrowserViewModel: ObservableObject {
 
     func rename(file: RemoteFile, to name: String) async {
         let name = name.trimmingCharacters(in: .whitespaces)
-        guard let sftp, isValidName(name), name != file.name else { return }
+        guard let sftp else { return }
+        // Rejections surface — a silent no-op looks like success.
+        guard isValidName(name), name != file.name else {
+            fail("Couldn't rename")
+            return
+        }
         let directory = (file.path as NSString).deletingLastPathComponent
         let destination = (directory as NSString).appendingPathComponent(name)
         do {
@@ -374,11 +382,19 @@ final class FileBrowserViewModel: ObservableObject {
         !name.isEmpty && name != "." && name != ".." && !name.contains("/")
     }
 
+    /// SFTP readdir hands back "." and ".." — showing them invites
+    /// deleting the parent or re-opening the current dir as a child.
+    private func isPseudoEntry(_ file: RemoteFile) -> Bool {
+        let name = file.name.hasSuffix("/") ? String(file.name.dropLast()) : file.name
+        return name == "." || name == ".."
+    }
+
     private func sort(_ list: [RemoteFile]) -> [RemoteFile] {
-        list.sorted {
-            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
-            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }
+        list.filter { !isPseudoEntry($0) }
+            .sorted {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
     }
 
     private func fail(_ message: String) {

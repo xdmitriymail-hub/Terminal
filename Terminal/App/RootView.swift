@@ -67,17 +67,19 @@ struct RootView: View {
             presenting: passwordSession
         ) { session in
             SecureField(session.profile.endpoint, text: $passwordText)
+            // Empty submits used to leave a stranded "Couldn't connect"
+            // badge — confirm stays disabled until there is a password.
             Button("Connect") { submitPassword() }
+                .disabled(passwordText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel", role: .cancel) {
                 engine.clearPasswordPrompt(for: session)
                 passwordSession = nil
                 passwordText = ""
             }
         }
-        .confirmationDialog(
+        .alert(
             hostKeyTitle,
-            isPresented: hostKeyPromptPresented,
-            titleVisibility: .visible
+            isPresented: hostKeyPromptPresented
         ) {
             hostKeyButtons
         } message: {
@@ -109,9 +111,9 @@ struct RootView: View {
                 await askHostKeyTrust(event)
             }
             // The engine cancels a prompt whose connection died — drop
-            // the UI side the same way.
-            engine.onHostKeyPromptDismissed = {
-                Task { @MainActor in dismissHostKeyPrompt() }
+            // exactly that event, not whatever happens to be in front.
+            engine.onHostKeyPromptDismissed = { event in
+                Task { @MainActor in dismissHostKeyPrompt(for: event) }
             }
             engine.onPasswordPromptDismissed = {
                 Task { @MainActor in
@@ -153,7 +155,11 @@ struct RootView: View {
     /// flight — offline tabs alone don't keep the audio engine up.
     private func syncKeepAlive() {
         keepAlive.updateActivity(
-            liveSessions: engine.sessions.filter { $0.state == .online }.count,
+            liveSessions: engine.sessions.filter {
+                // Connecting/reconnecting tabs are live work too — a
+                // locked device must not mute an in-flight reconnect.
+                $0.state == .online || $0.state == .connecting || $0.state == .reconnecting
+            }.count,
             activeTransfers: TransferManager.shared.activeCount
         )
     }
@@ -284,10 +290,10 @@ struct RootView: View {
         passwordText = ""
         guard !text.isEmpty else { return }
         // If the store fails, reconnecting would re-prompt forever —
-        // say so instead.
+        // say so instead. The raw OSStatus stays out of the UI.
         let status = Keychain.save(text, tag: "password.\(session.profile.id.uuidString)")
         guard status == errSecSuccess else {
-            errorMessage = "Couldn't store the password (\(status))"
+            errorMessage = String(localized: "Couldn't reach the keychain")
             return
         }
         session.reconnect()
@@ -308,11 +314,18 @@ struct RootView: View {
         pendingHostKey = event
     }
 
-    /// The connect attempt behind the front prompt was cancelled —
-    /// answer it with decline so its continuation unwinds cleanly.
-    private func dismissHostKeyPrompt() {
-        guard pendingHostKey != nil else { return }
-        resolveHostKey(false)
+    /// The connect attempt behind a queued prompt was cancelled —
+    /// decline precisely its event so a dead handshake never consumes
+    /// another server's prompt. If it was the front one, show the next.
+    private func dismissHostKeyPrompt(for event: HostKeyEvent) {
+        guard let idx = hostKeyQueue.firstIndex(where: { $0.0 == event }) else { return }
+        let (_, cont) = hostKeyQueue.remove(at: idx)
+        cont.resume(returning: false)
+        if idx == 0 {
+            pendingHostKey = nil
+            hostKeyPromptActive = false
+            presentNextHostKey()
+        }
     }
 
     private func resolveHostKey(_ allow: Bool) {
@@ -329,7 +342,7 @@ struct RootView: View {
         presentNextHostKey()
     }
 
-    private var hostKeyTitle: String {
+    private var hostKeyTitle: LocalizedStringKey {
         if case .changed = pendingHostKey {
             return "Host Key Changed"
         }
@@ -347,15 +360,30 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder
-    private var hostKeyMessage: some View {
+    /// host:port, algorithm, then the fingerprint in monospace on its
+    /// own line — Was/Now stacked for a changed key so the two can be
+    /// eyeballed without a cramped action sheet.
+    private var hostKeyMessage: Text {
         switch pendingHostKey {
         case .unknown(let host, let port, let keyLine, let fingerprint):
-            Text("First connection to \(host):\(port)\n\(Self.keyAlgorithm(of: keyLine))\n\(fingerprint)")
+            return Text("First connection to \(host):\(port)")
+                + Text("\n")
+                + Text(verbatim: Self.keyAlgorithm(of: keyLine))
+                + Text("\n")
+                + Text(verbatim: fingerprint)
+                    .font(.system(.footnote, design: .monospaced))
         case .changed(let host, let port, let keyLine, let expected, let fingerprint):
-            Text("The identity of \(host):\(port) changed — verify the new fingerprint out of band.\n\(Self.keyAlgorithm(of: keyLine))\nWas: \(expected)\nNow: \(fingerprint)")
+            return Text("The identity of \(host):\(port) changed — verify the new fingerprint out of band.")
+                + Text("\n")
+                + Text(verbatim: Self.keyAlgorithm(of: keyLine))
+                + Text("\n")
+                + Text("Was: \(expected)")
+                    .font(.system(.footnote, design: .monospaced))
+                + Text("\n")
+                + Text("Now: \(fingerprint)")
+                    .font(.system(.footnote, design: .monospaced))
         case .none:
-            EmptyView()
+            return Text("")
         }
     }
 
@@ -378,7 +406,9 @@ struct RootView: View {
 
     private func resolveClipboard(_ allow: Bool) {
         guard let request = clipboardRequest else { return }
-        if !clipboardQueue.isEmpty { clipboardQueue.removeFirst() }
+        if let idx = clipboardQueue.firstIndex(where: { $0.id == request.id }) {
+            clipboardQueue.remove(at: idx)
+        }
         clipboardRequest = nil
         if allow {
             // Consent is scoped to this tab's lifetime — the label says
@@ -418,7 +448,7 @@ struct SessionPickerSheet: View {
                     EmptyState(symbol: "server.rack", text: nil)
                 }
             }
-            .navigationTitle("Sessions")
+            .navigationTitle("Servers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

@@ -63,6 +63,11 @@ actor SSHConnection {
 
     var isConnected: Bool { client?.isConnected == true }
 
+    /// A handshake is in flight right now — a probe would only be
+    /// measuring an unfinished connect, and tearing it down mid-prompt
+    /// kills host-key/password asks that are legitimately waiting.
+    var isConnecting: Bool { connectTask != nil }
+
     private func setState(_ s: State) {
         state = s
         onStateChange(s)
@@ -231,14 +236,54 @@ actor SSHConnection {
     /// Opens a channel on the live transport; only a reused transport that
     /// turned out half-dead is dropped and retried once — failures on a
     /// fresh handshake (auth, host key, channel limits) surface as-is.
+    /// A channel-level failure (open refusal, exec timeout, SFTP channel
+    /// EOF) surfaces typed and leaves the pooled transport alone: other
+    /// tabs and services still share it.
     private func withTransport<T>(_ work: (Citadel.SSHClient) async throws -> T) async throws -> T {
         let reused = client?.isConnected == true
         do {
             return try await work(ensureConnected())
         } catch {
-            guard reused, !(error is CancellationError) else { throw error }
+            guard reused, !(error is CancellationError),
+                  Self.isTransportFailure(error) else { throw error }
             await markDisconnected()
             return try await work(ensureConnected())
+        }
+    }
+
+    /// Transport-death errors only: the TCP layer closed under the work
+    /// or SSH reported the transport itself gone. Channel-level refusals
+    /// (`channelSetupRejected`, `CommandFailed`, `channelCreationFailed`,
+    /// `globalRequestRefused`) are deliberately absent — they must never
+    /// poison the shared transport.
+    private static func isTransportFailure(_ error: Error) -> Bool {
+        switch error {
+        case is ChannelError:
+            // NIOSSH fails *child-channel* promises with ChannelError
+            // too (.eof on channel close, .ioOnClosedChannel) — the two
+            // are indistinguishable from the error alone, and a channel
+            // error must never invalidate the shared transport. Genuine
+            // TCP death arrives via onDisconnect → transportDropped or
+            // as IOError/NIOSSHError instead.
+            return false
+        case let ssh as NIOSSHError:
+            switch ssh.type {
+            case .tcpShutdown, .creatingChannelAfterClosure,
+                 .flowControlViolation, .protocolViolation:
+                return true
+            default:
+                return false
+            }
+        case let io as IOError:
+            switch io.errnoCode {
+            case EPIPE, ECONNRESET, ECONNABORTED, ENOTCONN, ETIMEDOUT,
+                 EHOSTDOWN, EHOSTUNREACH, ENETDOWN, ENETRESET, ENETUNREACH:
+                return true
+            default:
+                return false
+            }
+        default:
+            return false
         }
     }
 

@@ -11,6 +11,11 @@ struct ServerProfile: Codable, Identifiable, Hashable, Sendable {
     var forwards: [PortForward] = []
     var autoTmux = true
     var lastConnected: Date?
+    /// Detected server OS — filled after the first successful connect.
+    /// `osID` drives the row icon ("ubuntu", "darwin", "linux"…),
+    /// `osName` is the human label shown under the username.
+    var osID: String?
+    var osName: String?
 
     enum AuthMethod: Codable, Hashable, Sendable {
         case password

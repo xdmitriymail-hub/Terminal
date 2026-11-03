@@ -43,7 +43,7 @@ final class AppState: ObservableObject {
         guard locked, !unlocking else { return }
         unlocking = true
         defer { unlocking = false }
-        if await BiometricGate.evaluate("Unlock Terminal") {
+        if await BiometricGate.evaluate(String(localized: "Unlock Terminal")) {
             locked = false
         }
     }

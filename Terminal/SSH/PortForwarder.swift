@@ -718,6 +718,11 @@ private final class NIOPipeHandler: ChannelInboundHandler, Sendable {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         partner()?.deliver(data)
+        // autoRead is off and nothing propagates a fresh read request
+        // after inbound data — without re-asking here the pipe moves
+        // exactly one chunk each way, then stalls. The same paced path
+        // as read(context:) keeps partner-writability backpressure.
+        read(context: context)
     }
 
     /// `data` is written through immediately — per-chunk writeAndFlush

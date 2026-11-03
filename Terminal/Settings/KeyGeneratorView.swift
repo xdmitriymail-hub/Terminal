@@ -37,7 +37,7 @@ struct KeyGeneratorView: View {
                 if BiometricGate.available {
                     Section {
                         Toggle(isOn: $requireBiometry) {
-                            Label("Require Face ID", systemImage: "faceid")
+                            Label("Require Face ID / Touch ID", systemImage: "faceid")
                         }
                     }
                 }

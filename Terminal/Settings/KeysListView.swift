@@ -8,6 +8,7 @@ struct KeysListView: View {
     @State private var showImport = false
     @State private var selected: StoredSSHKey?
     @State private var deleteFailed = false
+    @State private var pendingDelete: IndexSet?
 
     var body: some View {
         Group {
@@ -33,7 +34,7 @@ struct KeysListView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    .onDelete(perform: delete)
+                    .onDelete { offsets in pendingDelete = offsets }
                 }
                 .scrollContentBackground(.hidden)
             }
@@ -73,6 +74,15 @@ struct KeysListView: View {
         .alert("Couldn't delete", isPresented: $deleteFailed) {
             Button("OK") {}
         }
+        .alert(
+            "Delete \(pendingDelete?.first.flatMap { keys.keys[safe: $0] }?.name ?? "")?",
+            isPresented: deletePresented
+        ) {
+            Button("Delete", role: .destructive) {
+                if let offsets = pendingDelete { delete(offsets) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private func row(_ key: StoredSSHKey) -> some View {
@@ -109,6 +119,13 @@ struct KeysListView: View {
         .padding(.vertical, 2)
     }
 
+    private var deletePresented: Binding<Bool> {
+        Binding(
+            get: { pendingDelete != nil },
+            set: { if !$0 { pendingDelete = nil } }
+        )
+    }
+
     private func delete(_ offsets: IndexSet) {
         // Snapshot first — each delete mutates the array and shifts
         // the indexes the remaining offsets point at. The store
@@ -121,12 +138,6 @@ struct KeysListView: View {
             deleteFailed = true
             Haptics.failed()
         }
-    }
-
-    /// The base64 body only — the wire prefix ("ssh-ed25519 …") stays
-    /// in the stored/exported line but never on screen.
-    static func publicKeyBody(_ line: String) -> String {
-        line.split(separator: " ").dropFirst().joined(separator: " ")
     }
 
     static func typeLabel(_ type: StoredSSHKey.KeyType) -> String {
@@ -186,7 +197,9 @@ private struct KeyDetailView: View {
                         }
                     }
 
-                    Text(KeysListView.publicKeyBody(key.publicKeyOpenSSH))
+                    // The complete "type base64" line — anything less
+                    // fails when pasted into authorized_keys.
+                    Text(key.publicKeyOpenSSH)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
@@ -301,7 +314,7 @@ private struct KeyDetailView: View {
         }
     }
 
-    private func pill(_ title: String, symbol: String) -> some View {
+    private func pill(_ title: LocalizedStringKey, symbol: String) -> some View {
         Label(title, systemImage: symbol)
             .font(.subheadline.weight(.medium))
             .frame(maxWidth: .infinity)

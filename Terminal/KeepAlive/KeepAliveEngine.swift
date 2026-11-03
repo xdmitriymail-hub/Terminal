@@ -156,7 +156,12 @@ final class KeepAliveEngine: ObservableObject {
     private func stop() {
         player?.stop()
         engine.stop()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let session = AVAudioSession.sharedInstance()
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        // Roll the category back too — same as start()'s failure
+        // rollback, so disabling keep-alive mid-flight leaves the
+        // audio session exactly as it was found.
+        try? session.setCategory(.ambient)
         isRunning = false
     }
 

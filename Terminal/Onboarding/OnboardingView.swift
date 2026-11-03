@@ -12,9 +12,10 @@ struct OnboardingView: View {
     @State private var port = "22"
     @State private var username = ""
     @State private var password = ""
-    @State private var saveFailed = false
-    @State private var saveStatus: OSStatus = 0
     @State private var profileSaveFailed = false
+    /// A profile whose store write failed — the alert's OK still
+    /// completes the connect so the warning always reaches the user.
+    @State private var pendingConnect: ServerProfile?
     @FocusState private var focus: Field?
 
     private enum Field { case host, port, username, password }
@@ -72,14 +73,13 @@ struct OnboardingView: View {
             .background(Color(uiColor: .systemBackground).ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .onTapGesture { focus = nil }
-            .alert(
-                "Couldn't store the password (\(saveStatus)) — you'll be asked for it when connecting",
-                isPresented: $saveFailed
-            ) {
-                Button("OK") {}
-            }
             .alert("Couldn't save the server — it won't be there next launch", isPresented: $profileSaveFailed) {
-                Button("OK") {}
+                Button("OK") {
+                    guard let profile = pendingConnect else { return }
+                    pendingConnect = nil
+                    done = true
+                    engine.openSession(for: profile, cols: 80, rows: 24)
+                }
             }
         }
     }
@@ -146,8 +146,8 @@ struct OnboardingView: View {
         .padding(.horizontal, 24)
     }
 
-    private func field(_ title: String, text: Binding<String>, focused: Field,
-                       placeholder: String, secure: Bool = false,
+    private func field(_ title: LocalizedStringKey, text: Binding<String>, focused: Field,
+                       placeholder: LocalizedStringKey, secure: Bool = false,
                        numeric: Bool = false, submit: @escaping () -> Void) -> some View {
         LabeledContent {
             Group {
@@ -204,6 +204,8 @@ struct OnboardingView: View {
 
             Divider().padding(.leading, 16)
 
+            // Browsing servers counts as "set up" — without this,
+            // closing the pushed view's last tab resurrected onboarding.
             NavigationLink {
                 HostsListView(embeddedInStack: true)
             } label: {
@@ -219,6 +221,7 @@ struct OnboardingView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             }
+            .simultaneousGesture(TapGesture().onEnded { done = true })
         }
         .terminalGlass(cornerRadius: 16)
         .padding(.horizontal, 24)
@@ -256,22 +259,30 @@ struct OnboardingView: View {
         if !password.isEmpty {
             let status = Keychain.save(password, tag: "password.\(profile.id.uuidString)")
             if status != errSecSuccess {
-                // The connect below will ask for the password instead —
-                // but the user should know why.
-                saveStatus = status
-                saveFailed = true
+                // The connect below will ask for the password anyway.
+                // Routed to the root alert — an in-view alert dies with
+                // the view the moment `done` flips, and the raw
+                // OSStatus never reaches the UI.
+                engine.reportError(
+                    String(localized: "Couldn't store the password — you'll be asked for it when connecting")
+                )
             }
         }
         connect(profile)
     }
 
+    /// Save BEFORE `done` flips — an alert raised after dismissal
+    /// would die with the view. On failure the alert's OK completes
+    /// the connect via `pendingConnect`.
     private func connect(_ profile: ServerProfile) {
         Haptics.tap()
-        done = true
-        if !profiles.save(profile) {
+        guard profiles.save(profile) else {
             Haptics.failed()
+            pendingConnect = profile
             profileSaveFailed = true
+            return
         }
+        done = true
         engine.openSession(for: profile, cols: 80, rows: 24)
     }
 }

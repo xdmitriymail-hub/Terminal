@@ -138,10 +138,10 @@ extension TerminalTheme {
     /// Short user-facing name derived from the identifier.
     var displayName: String {
         switch id {
-        case "pro": return "Pro"
-        case "homebrew": return "Homebrew"
-        case "graphite": return "Graphite"
-        case "paper": return "Paper"
+        case "pro": return String(localized: "Pro")
+        case "homebrew": return String(localized: "Homebrew")
+        case "graphite": return String(localized: "Graphite")
+        case "paper": return String(localized: "Paper")
         default: return id.capitalized
         }
     }

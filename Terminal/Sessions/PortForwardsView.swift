@@ -80,9 +80,16 @@ struct PortForwardsView: View {
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(":\(forward.listenPort) → \(forward.targetHost):\(forward.targetPort)")
-                    .font(.system(.subheadline, design: .monospaced))
-                    .lineLimit(1)
+                // Dynamic rules are SOCKS — there is no target to draw.
+                if forward.kind == .dynamic {
+                    Text("SOCKS :\(forward.listenPort)")
+                        .font(.system(.subheadline, design: .monospaced))
+                        .lineLimit(1)
+                } else {
+                    Text(":\(forward.listenPort) → \(forward.targetHost):\(forward.targetPort)")
+                        .font(.system(.subheadline, design: .monospaced))
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
@@ -95,7 +102,9 @@ struct PortForwardsView: View {
                 EmptyView()
             }
             .labelsHidden()
-            .accessibilityLabel(":\(forward.listenPort) → \(forward.targetHost):\(forward.targetPort)")
+            .accessibilityLabel(forward.kind == .dynamic
+                ? String(localized: "SOCKS :\(forward.listenPort)")
+                : String(localized: ":\(forward.listenPort) → \(forward.targetHost):\(forward.targetPort)"))
         }
         .padding(.vertical, 2)
     }
@@ -126,10 +135,11 @@ struct PortForwardsView: View {
 }
 
 /// Live rule state from the engine — starting spins, ready is a dot,
-/// failed shows the warning glyph.
+/// failed shows the warning glyph; tapping it explains why.
 private struct ForwardStatusView: View {
     @ObservedObject var service: PortForwardService
     let id: UUID
+    @State private var failureReason: String?
 
     var body: some View {
         switch service.runtime[id] {
@@ -140,10 +150,26 @@ private struct ForwardStatusView: View {
             Circle()
                 .fill(Color.terminalAccent)
                 .frame(width: 7, height: 7)
-        case .failed:
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption2)
-                .foregroundStyle(.red)
+        case .failed(let reason):
+            Button {
+                failureReason = reason
+            } label: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .frame(width: 28, height: 28)
+                    // 28pt glyph, ≥44pt hit.
+                    .contentShape(Rectangle().inset(by: -8))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Forward failed")
+            .accessibilityValue(reason)
+            .alert(reason, isPresented: Binding(
+                get: { failureReason != nil },
+                set: { if !$0 { failureReason = nil } }
+            )) {
+                Button("OK") {}
+            }
         case .stopped, nil:
             Circle()
                 .fill(.secondary.opacity(0.4))
@@ -163,8 +189,10 @@ private struct ForwardEditorView: View {
     let onAdd: (PortForward) -> Void
 
     private var isValid: Bool {
-        (1...65535).contains(listenPort)
-            && (1...65535).contains(targetPort)
+        guard (1...65535).contains(listenPort) else { return false }
+        // SOCKS needs no target — the client picks it per connection.
+        if kind == .dynamic { return true }
+        return (1...65535).contains(targetPort)
             && !targetHost.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
@@ -187,18 +215,21 @@ private struct ForwardEditorView: View {
                             .multilineTextAlignment(.trailing)
                             .font(.system(.body, design: .monospaced))
                     }
-                    LabeledContent("Target") {
-                        TextField("localhost", text: $targetHost)
-                            .multilineTextAlignment(.trailing)
-                            .font(.system(.body, design: .monospaced))
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    LabeledContent("Port") {
-                        TextField("8080", value: $targetPort, format: .number.grouping(.never))
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .font(.system(.body, design: .monospaced))
+                    // Dynamic = SOCKS: a fixed target is meaningless.
+                    if kind != .dynamic {
+                        LabeledContent("Target") {
+                            TextField("localhost", text: $targetHost)
+                                .multilineTextAlignment(.trailing)
+                                .font(.system(.body, design: .monospaced))
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+                        LabeledContent("Port") {
+                            TextField("8080", value: $targetPort, format: .number.grouping(.never))
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .font(.system(.body, design: .monospaced))
+                        }
                     }
                 }
             }

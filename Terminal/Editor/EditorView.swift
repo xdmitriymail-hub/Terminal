@@ -47,7 +47,7 @@ struct EditorView: UIViewRepresentable {
         textView.smartQuotesType = .no
         textView.smartDashesType = .no
         textView.smartInsertDeleteType = .no
-        textView.keyboardType = .asciiCapable
+        textView.keyboardType = .default
         // .default follows the interface style — dark keyboard in dark
         // mode, light in light.
         textView.keyboardAppearance = .default

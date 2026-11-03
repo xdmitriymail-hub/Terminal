@@ -16,12 +16,14 @@ final class ModifierState {
 
     /// Escape-sequence variant for special keys (arrows etc.) that are
     /// already CSI — Ctrl+arrow → CSI 1;5X, Alt+arrow → CSI 1;3X.
-    func arrow(_ code: String) -> [UInt8] {
+    /// DECCKM application-cursor mode sends SS3 for the bare key
+    /// (vim/less/tmux copy-mode rely on it); modified arrows stay CSI.
+    func arrow(_ code: String, applicationCursor: Bool = false) -> [UInt8] {
         let seq: String
         switch (ctrl, alt) {
         case (true, _): seq = "\u{1B}[1;5\(code)"
         case (_, true): seq = "\u{1B}[1;3\(code)"
-        default: seq = "\u{1B}[\(code)"
+        default: seq = applicationCursor ? "\u{1B}O\(code)" : "\u{1B}[\(code)"
         }
         reset()
         return [UInt8](seq.utf8)
@@ -45,12 +47,37 @@ final class KeyboardAccessoryView: UIInputView {
     /// Hide is wired by the owning coordinator so it resigns the actual
     /// terminal view — a global responder search can hit the wrong tab.
     var onHide: () -> Void = {}
+    /// DECCKM lookup, wired per attach — the bar outlives any one
+    /// TerminalView, so this always points at the current terminal.
+    var applicationCursor: () -> Bool = { false }
 
     private var ctrlButton: KeyButton?
     private var altButton: KeyButton?
 
+    /// One bar per session: recreating the input view on every SwiftUI
+    /// diff steals/represents the keyboard — that was the flicker.
+    /// Weak-boxed so a closed session's bar can die.
+    private static var bars: [UUID: BarBox] = [:]
+
+    private final class BarBox {
+        weak var bar: KeyboardAccessoryView?
+    }
+
+    static func forSession(_ session: TerminalSession) -> KeyboardAccessoryView {
+        if let cached = bars[session.id]?.bar { return cached }
+        let bar = KeyboardAccessoryView()
+        bar.bind(modifiers: session.modifiers)
+        bar.onSend = { [weak session] bytes in
+            session?.send(ArraySlice(bytes))
+        }
+        let box = BarBox()
+        box.bar = bar
+        bars[session.id] = box
+        return bar
+    }
+
     init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 46), inputViewStyle: .keyboard)
+        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 56), inputViewStyle: .keyboard)
         accessibilityIdentifier = "keyboardAccessory"
         bind(modifiers: modifiers)
         build()
@@ -126,8 +153,8 @@ final class KeyboardAccessoryView: UIInputView {
 
         stack.addArrangedSubview(sep())
 
-        stack.addArrangedSubview(key("home", glyph: "arrowtriangle.left.fill") { [weak self] in self?.emitString("\u{1B}[H") })
-        stack.addArrangedSubview(key("end", glyph: "arrowtriangle.right.fill") { [weak self] in self?.emitString("\u{1B}[F") })
+        stack.addArrangedSubview(key("home", glyph: "arrowtriangle.left.fill") { [weak self] in self?.emitArrow("H") })
+        stack.addArrangedSubview(key("end", glyph: "arrowtriangle.right.fill") { [weak self] in self?.emitArrow("F") })
 
         // Hide lives in a fixed trailing zone — on iPhone the scrollable
         // keys would otherwise push it off-screen.
@@ -182,7 +209,7 @@ final class KeyboardAccessoryView: UIInputView {
     }
 
     private func emitArrow(_ code: String) {
-        onSend(modifiers.arrow(code))
+        onSend(modifiers.arrow(code, applicationCursor: applicationCursor()))
     }
 }
 
@@ -244,7 +271,7 @@ final class KeyButton: UIControl {
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(greaterThanOrEqualToConstant: 38),
-            heightAnchor.constraint(equalToConstant: 34)
+            heightAnchor.constraint(equalToConstant: 44)
         ])
 
         addTarget(self, action: #selector(tapped), for: .touchUpInside)

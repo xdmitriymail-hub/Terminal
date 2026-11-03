@@ -37,7 +37,7 @@ struct AddSnippetView: View {
                         .lineLimit(1...6)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                        .keyboardType(.asciiCapable)
+                        .keyboardType(.default)
                 }
                 Section {
                     Toggle(isOn: $autoEnter) {

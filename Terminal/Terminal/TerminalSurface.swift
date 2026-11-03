@@ -39,7 +39,18 @@ struct TerminalSurface: UIViewRepresentable {
             view.inputAccessoryView = accessory
             if view.isFirstResponder { view.reloadInputViews() }
         }
-        if !isActive, view.isFirstResponder {
+        // The bar is shared per session — another surface may have
+        // claimed its closures since this view last attached.
+        Self.wireAccessory(view, coordinator: context.coordinator)
+        if isActive {
+            // This tab resigned only because it was hidden — switching
+            // back brings the keyboard up again without a second tap.
+            if context.coordinator.wasFirstResponderOnDeactivate {
+                context.coordinator.wasFirstResponderOnDeactivate = false
+                _ = view.becomeFirstResponder()
+            }
+        } else if view.isFirstResponder {
+            context.coordinator.wasFirstResponderOnDeactivate = true
             _ = view.resignFirstResponder()
         }
         context.coordinator.modifiers = modifiers
@@ -54,7 +65,33 @@ struct TerminalSurface: UIViewRepresentable {
         view.nativeBackgroundColor = theme.uiBackground
         view.nativeForegroundColor = theme.uiForeground
         view.caretColor = theme.uiCursor
+        // Block-cursor glyphs are legible only against the background.
+        view.caretTextColor = theme.uiBackground
+        // Theme selection tint — the default teal ignored the palette.
+        view.selectedTextBackgroundColor = UIColor(theme.selection)
+        view.selectedTextForegroundColor = theme.uiForeground
         view.backgroundColor = theme.uiBackground
+        // The ANSI palette is the theme — without it `ls` colors and
+        // TUIs keep the stock mapping regardless of the picked look.
+        view.installColors(theme.ansiColors)
+    }
+
+    /// The accessory bar outlives any single TerminalView (it's cached
+    /// per session), so its closures are re-pointed at THIS view every
+    /// time they're attached — a stale capture would hide the wrong
+    /// keyboard or read a dead terminal's cursor mode.
+    private static func wireAccessory(_ view: TerminalView, coordinator: Coordinator) {
+        guard let bar = view.inputAccessoryView as? KeyboardAccessoryView else { return }
+        bar.onHide = { [weak view, weak coordinator] in
+            // An explicit hide is not a tab-switch resign — don't
+            // resurrect the keyboard on the next activation.
+            coordinator?.wasFirstResponderOnDeactivate = false
+            _ = view?.resignFirstResponder()
+            view?.window?.endEditing(true)
+        }
+        bar.applicationCursor = { [weak view] in
+            view?.terminalInputStateSnapshot()?.applicationCursor ?? false
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -72,6 +109,9 @@ struct TerminalSurface: UIViewRepresentable {
         private weak var view: TerminalView?
         var modifiers: ModifierState?
         var appliedStyle: StyleSignature?
+        /// Set when the surface resigned first responder only because
+        /// its tab was hidden — reactivation restores the keyboard.
+        var wasFirstResponderOnDeactivate = false
         private var lastBell = Date.distantPast
 
         func attach(session: TerminalSession, view: TerminalView, modifiers: ModifierState?) {
@@ -81,12 +121,9 @@ struct TerminalSurface: UIViewRepresentable {
             session.attachOutput { [weak view] bytes in
                 view?.feed(byteArray: bytes)
             }
-            // Hide targets THIS terminal, not whichever responder a
-            // global sendAction happens to find.
-            (view.inputAccessoryView as? KeyboardAccessoryView)?.onHide = { [weak view] in
-                _ = view?.resignFirstResponder()
-                view?.window?.endEditing(true)
-            }
+            // Hide/cursor-mode target THIS terminal — re-wired on every
+            // attach because the cached bar may point at an old view.
+            TerminalSurface.wireAccessory(view, coordinator: self)
             // Swipe-to-dismiss on the terminal's scroll view.
             view.subviews
                 .compactMap { $0 as? UIScrollView }

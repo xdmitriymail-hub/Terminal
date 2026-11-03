@@ -92,6 +92,10 @@ jobs:
             nc -z 127.0.0.1 22 && break || sleep 2
           done
           nc -z 127.0.0.1 22 && echo "sshd up"
+          # Which families is sshd actually on? The app must reach a
+          # listener on whichever address its resolver picks first.
+          nc -z ::1 22 && echo "sshd: ipv6 ok" || echo "sshd: ipv4 only"
+          exec 3<>/dev/tcp/127.0.0.1/22 && head -c 40 <&3 && exec 3<&- && echo
 
       - name: Drive UI + capture screenshots
         run: |

@@ -31,6 +31,11 @@ final class SessionEngine: ObservableObject {
     /// session's request is retired instead of left hanging.
     private var passwordQueue: [UUID] = []
 
+    /// Published mirror of passwordQueue — UI that must react to a
+    /// prompt appearing/clearing (connect ring, dismiss flows) subscribes
+    /// here rather than polling session state.
+    @Published private(set) var awaitingPasswordIDs: Set<UUID> = []
+
     let profiles: ProfilesStore
     let keys: KeysStore
     let knownHosts: KnownHostsStore
@@ -39,9 +44,10 @@ final class SessionEngine: ObservableObject {
     /// Set by UI layer: asks the user to confirm unknown/changed host keys.
     var hostKeyDecider: (@MainActor (HostKeyEvent) async -> Bool)?
 
-    /// Set by UI layer: a host-key prompt it may be showing was resolved
-    /// or cancelled underneath it — remove the dialog without answering.
-    var onHostKeyPromptDismissed: (@Sendable () -> Void)?
+    /// Set by UI layer: the prompt for this event was resolved or
+    /// cancelled underneath it — remove that dialog only, without
+    /// answering. A sibling server's pending prompt is untouched.
+    var onHostKeyPromptDismissed: (@Sendable (HostKeyEvent) -> Void)?
 
     /// Set by UI layer: the pending password prompt must come down
     /// (its session terminated or authenticated through another path).
@@ -61,12 +67,30 @@ final class SessionEngine: ObservableObject {
     /// tmux presence per profile — detected once, reused across tabs.
     private var tmuxAvailable: [UUID: Bool] = [:]
 
+    /// Consecutive probe failures per profile — one timed-out probe is
+    /// a strike, not a verdict. Reset on success or when the transport
+    /// is declared dead; a mere successful handshake does not clear it,
+    /// so a flapping link can't churn reconnects forever.
+    private var probeFailures: [UUID: Int] = [:]
+
     /// Detects tmux on the session's host, caching the answer per profile.
     func hasTmux(on session: TerminalSession) async -> Bool {
         if let cached = tmuxAvailable[session.profile.id] { return cached }
         let found = await session.detectTmux()
         tmuxAvailable[session.profile.id] = found
         return found
+    }
+
+    /// Fills `osID`/`osName` on the profile after a connect — the row
+    /// icon and subtitle follow whatever the server actually runs.
+    /// Probed once; the stored value persists across launches.
+    func learnOS(for session: TerminalSession) async {
+        guard session.profile.osID == nil,
+              let detected = await session.detectOS() else { return }
+        var updated = session.profile
+        updated.osID = detected.id
+        updated.osName = detected.name
+        _ = profiles.save(updated)
     }
 
     init(profiles: ProfilesStore, keys: KeysStore, knownHosts: KnownHostsStore, settings: SettingsStore) {
@@ -150,9 +174,17 @@ final class SessionEngine: ObservableObject {
             let tag = "password.\(profile.id.uuidString)"
             let (data, status) = Keychain.loadWithStatus(tag: tag)
             guard status == errSecSuccess else {
-                throw status == errSecItemNotFound
-                    ? KeyVaultError.keyMaterialMissing
-                    : KeyVaultError.keychainFailure(status)
+                // Same OSStatus mapping as KeyVault.loadMaterial: a
+                // cancelled/denied prompt is an auth gate, never a
+                // transport failure worth retrying against.
+                switch status {
+                case errSecItemNotFound:
+                    throw KeyVaultError.keyMaterialMissing
+                case errSecUserCanceled, errSecInteractionNotAllowed:
+                    throw KeyVaultError.biometricDenied
+                default:
+                    throw KeyVaultError.keychainFailure(status)
+                }
             }
             guard let password = data.flatMap({ String(data: $0, encoding: .utf8) }),
                   !password.isEmpty else {
@@ -224,8 +256,11 @@ final class SessionEngine: ObservableObject {
         for (id, pending) in doomed {
             pendingHostKeys[id] = nil
             pending.resume(false)
+            // The UI keys its prompt queue by the event — only the
+            // prompt belonging to this dead connect is dismissed, so
+            // a concurrent handshake's ask is never resolved for it.
+            onHostKeyPromptDismissed?(pending.event)
         }
-        onHostKeyPromptDismissed?()
     }
 
     // MARK: - Password prompts
@@ -236,8 +271,16 @@ final class SessionEngine: ObservableObject {
     func authNeeded(_ session: TerminalSession) {
         if !passwordQueue.contains(session.id) {
             passwordQueue.append(session.id)
+            awaitingPasswordIDs.insert(session.id)
         }
         onAuthNeeded?(session)
+    }
+
+    /// True while this session's password prompt is outstanding — the
+    /// host row keeps its "connecting" affordance instead of snapping
+    /// to a red error the prompt may yet resolve.
+    func isAwaitingPassword(_ session: TerminalSession) -> Bool {
+        passwordQueue.contains(session.id)
     }
 
     /// Retires a session's password request — authenticated, cancelled
@@ -245,6 +288,7 @@ final class SessionEngine: ObservableObject {
     func clearPasswordPrompt(for session: TerminalSession) {
         guard passwordQueue.contains(session.id) else { return }
         passwordQueue.removeAll { $0 == session.id }
+        awaitingPasswordIDs.remove(session.id)
         onPasswordPromptDismissed?()
     }
 
@@ -260,6 +304,7 @@ final class SessionEngine: ObservableObject {
 
     /// Drops a pooled transport (e.g. when profile secrets changed).
     func invalidateConnection(for profileID: UUID) {
+        probeFailures[profileID] = nil
         cancelHostKeyPrompts(profileID: profileID)
         if let service = forwardServices.removeValue(forKey: profileID) {
             Task { await service.stopAll() }
@@ -412,18 +457,41 @@ final class SessionEngine: ObservableObject {
         }
     }
 
+    /// A pending prompt for this profile — host-key or password — means
+    /// a connect is legitimately waiting on the user, not stuck. Probing
+    /// now would race the answer against a transport teardown.
+    private func hasPendingPrompt(for profileID: UUID) -> Bool {
+        if pendingHostKeys.values.contains(where: { $0.profileID == profileID }) {
+            return true
+        }
+        return sessions.contains { $0.profile.id == profileID && passwordQueue.contains($0.id) }
+    }
+
     /// Real transport probe for every pooled connection: a remote no-op
     /// proves auth + channels still work. Dead transports are dropped so
-    /// the next channel request re-handshakes lazily.
+    /// the next channel request re-handshakes lazily — but only after
+    /// TWO consecutive failed probes: a single timed-out `true` exec on
+    /// a healthy-but-slow session must never kick the reconnect loop.
+    /// Connections mid-handshake or waiting on a prompt are skipped —
+    /// a probe then would only measure an unfinished connect.
     private func probeAllConnections() async {
-        for (_, conn) in connections {
+        for (profileID, conn) in connections {
+            guard await !conn.isConnecting,
+                  !hasPendingPrompt(for: profileID) else { continue }
             guard await conn.isConnected else {
+                probeFailures[profileID] = nil
                 await conn.markDisconnected()
                 continue
             }
-            if await !conn.probe() {
-                await conn.markDisconnected()
+            if await conn.probe() {
+                probeFailures[profileID] = nil
+                continue
             }
+            let failures = (probeFailures[profileID] ?? 0) + 1
+            probeFailures[profileID] = failures
+            guard failures >= 2 else { continue }
+            probeFailures[profileID] = nil
+            await conn.markDisconnected()
         }
     }
 

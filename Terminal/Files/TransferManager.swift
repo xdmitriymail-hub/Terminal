@@ -58,7 +58,13 @@ final class TransferManager: ObservableObject {
     /// Bytes land in a hidden `.<name>.partial-<uuid>` sibling and are
     /// atomically moved onto the final name only at EOF — a failed or
     /// cancelled download never leaves a "finished-looking" file behind.
-    func download(file: RemoteFile, via service: SFTPService) {
+    /// `onSuccess` receives the committed local URL so callers can hand
+    /// the file onward — e.g. straight into the system export picker.
+    func download(
+        file: RemoteFile,
+        via service: SFTPService,
+        onSuccess: (@MainActor (URL) -> Void)? = nil
+    ) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let local = uniqueURL(in: docs, named: file.name)
         let partial = partialURL(for: local, in: docs)
@@ -96,6 +102,7 @@ final class TransferManager: ObservableObject {
                 // one atomic same-directory move.
                 try FileManager.default.moveItem(at: partial, to: local)
                 markDone(id, local: local)
+                onSuccess?(local)
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: partial)
                 markCancelled(id)
@@ -177,10 +184,9 @@ final class TransferManager: ObservableObject {
         transfers.removeAll { $0.id == id }
     }
 
+    /// Drop finished rows only — downloaded files stay in Documents.
+    /// The destructive path is `removeAndDeleteFile` (explicit swipe).
     func clearFinished() {
-        for t in transfers where !t.state.isActive && !t.isUpload {
-            if let url = t.localURL { try? FileManager.default.removeItem(at: url) }
-        }
         transfers.removeAll { !$0.state.isActive }
     }
 

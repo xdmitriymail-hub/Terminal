@@ -130,18 +130,25 @@ enum KeyVault {
             return .p521(username: username, privateKey: try Crypto.P521.Signing.PrivateKey(rawRepresentation: raw))
 
         case .secureEnclaveP256:
+            var authContext: LAContext?
             if storedKey.requiresBiometry {
-                let authContext = LAContext()
-                authContext.touchIDAuthenticationAllowableReuseDuration = 30
-                guard (try? await authContext.evaluatePolicy(
+                let evaluated = LAContext()
+                evaluated.touchIDAuthenticationAllowableReuseDuration = 30
+                guard (try? await evaluated.evaluatePolicy(
                     .deviceOwnerAuthentication,
                     localizedReason: storedKey.name
                 )) == true else {
                     throw KeyVaultError.biometricDenied
                 }
+                authContext = evaluated
             }
             let raw = try loadMaterial(tag: storedKey.keychainTag, context: context)
-            let seKey = try CryptoKit.SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: raw)
+            // Bind the evaluated context — without it the sign call
+            // inside the NIO handshake re-prompts off-main and fails.
+            let seKey = try CryptoKit.SecureEnclave.P256.Signing.PrivateKey(
+                dataRepresentation: raw,
+                authenticationContext: authContext ?? context
+            )
             return .custom(SecureEnclaveAuthDelegate(username: username, key: seKey))
 
         case .rsa:

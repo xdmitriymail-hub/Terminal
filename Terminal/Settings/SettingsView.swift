@@ -58,7 +58,7 @@ struct SettingsView: View {
 
                     if BiometricGate.available {
                         Toggle(isOn: $settings.settings.requireBiometry) {
-                            rowLabel("Passcode or Face ID", icon: "faceid")
+                            rowLabel("Passcode or biometrics", icon: "faceid")
                         }
                     }
 
@@ -74,7 +74,7 @@ struct SettingsView: View {
                     }
 
                     Toggle(isOn: $settings.settings.autoTmux) {
-                        rowLabel("Sessions persist", icon: "clock.arrow.circlepath")
+                        rowLabel("Resume sessions", icon: "clock.arrow.circlepath")
                     }
 
                     Toggle(isOn: $settings.settings.showKeyboardBar) {
@@ -82,7 +82,7 @@ struct SettingsView: View {
                     }
 
                     LabeledContent {
-                        TextField("/bin/zsh", text: $settings.settings.shellOverride)
+                        TextField("Default", text: $settings.settings.shellOverride)
                             .multilineTextAlignment(.trailing)
                             .font(.system(.body, design: .monospaced))
                             .textInputAutocapitalization(.never)
@@ -90,6 +90,10 @@ struct SettingsView: View {
                     } label: {
                         rowLabel("Shell", icon: "terminal")
                     }
+                } footer: {
+                    // Both switches gate tmux — say so at the only
+                    // place the global one is visible.
+                    Text("Resume sessions also needs each server's own switch.")
                 }
 
                 Section {
@@ -115,7 +119,8 @@ struct SettingsView: View {
     }
 
     /// Settings-style row: accent rounded square with a white glyph + title.
-    private func rowLabel(_ title: String, icon: String) -> some View {
+    /// LocalizedStringKey — a String argument would render verbatim.
+    private func rowLabel(_ title: LocalizedStringKey, icon: String) -> some View {
         Label {
             Text(title)
         } icon: {

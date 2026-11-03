@@ -36,9 +36,9 @@ struct AddServerView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
+                Section("Server") {
                     TextField("Name", text: $draft.name)
-                    TextField("Host", text: $draft.host)
+                    TextField("Address", text: $draft.host)
                         .font(.system(.body, design: .monospaced))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -47,7 +47,7 @@ struct AddServerView: View {
                         .keyboardType(.numberPad)
                 }
 
-                Section {
+                Section("Sign In") {
                     TextField("Username", text: $draft.username)
                         .font(.system(.body, design: .monospaced))
                         .textInputAutocapitalization(.never)
@@ -69,7 +69,7 @@ struct AddServerView: View {
                         if !keys.keys.isEmpty {
                             Picker("Key", selection: $selectedKeyID) {
                                 ForEach(keys.keys) { key in
-                                    Text(key.name.isEmpty ? "Key" : key.name)
+                                    Text(key.name.isEmpty ? String(localized: "Key") : key.name)
                                         .tag(Optional(key.id))
                                 }
                             }
@@ -88,19 +88,23 @@ struct AddServerView: View {
                 }
 
                 Section {
-                    Picker("Via", selection: $draft.jumpProfileID) {
-                        Text("None").tag(Optional<UUID>.none)
+                    Picker("Connect through", selection: $draft.jumpProfileID) {
+                        Text("Directly").tag(Optional<UUID>.none)
                         ForEach(profiles.profiles.filter { $0.id != draft.id }) { p in
                             Text(p.displayName).tag(Optional(p.id))
                         }
                     }
-                    Toggle("Session persists", isOn: $draft.autoTmux)
+                    Toggle("Resume session", isOn: $draft.autoTmux)
+                } header: {
+                    Text("More")
+                } footer: {
+                    Text("“Connect through” opens this server via another saved server — for machines that aren't reachable directly.")
                 }
             }
             .scrollContentBackground(.hidden)
             .background(Color(uiColor: .systemGroupedBackground))
             .tint(.terminalAccent)
-            .navigationTitle(isEditing ? "Edit" : "New Server")
+            .navigationTitle(isEditing ? String(localized: "Edit") : String(localized: "New Server"))
             .alert(errorMessage ?? "", isPresented: errorPresented) {
                 Button("OK") { errorMessage = nil }
             }
@@ -163,7 +167,7 @@ struct AddServerView: View {
                 // saving without it would lock the user out next time.
                 guard Keychain.save(password, tag: "password.\(draft.id.uuidString)") == errSecSuccess else {
                     Haptics.failed()
-                    errorMessage = "Couldn't store the password"
+                    errorMessage = String(localized: "Couldn't reach the keychain")
                     return
                 }
             }
@@ -174,7 +178,7 @@ struct AddServerView: View {
         // now-unused stored password.
         guard profiles.save(draft) else {
             Haptics.failed()
-            errorMessage = "Couldn't save the server"
+            errorMessage = String(localized: "Couldn't save the server")
             return
         }
         if case .key = newAuth {

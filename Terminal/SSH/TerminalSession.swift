@@ -45,6 +45,10 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// Auto-reconnect backoff state — cancellable, capped.
     private var retryTask: Task<Void, Never>?
     private var retryAttempt = 0
+    /// Set when auth itself was declined (Face ID cancelled, keychain
+    /// prompt denied) — an auth gate, not transport death: auto-retry
+    /// never fires on it, but an explicit reconnect() recovers cleanly.
+    private var authGated = false
     private static let maxRetryAttempts = 5
     /// Set after the user consents once — OSC 52 writes are then allowed
     /// for the rest of this session's life.
@@ -97,9 +101,34 @@ final class TerminalSession: ObservableObject, Identifiable {
         }
     }
 
+    /// Bytes of our own internal commands still awaiting their PTY
+    /// echo — swallowed in deliverOutput so wiring like the tmux
+    /// attach never surfaces on screen or in scrollback.
+    private var pendingEcho = Data()
+    private var echoDeadline = Date.distantPast
+
     /// Queues output for the next frame batch; with no view attached it
-    /// lands in the bounded tail buffer instead.
+    /// lands in the bounded tail buffer instead. Internal-command echo
+    /// is stripped first — anything not matching the pending echo falls
+    /// through untouched, so real output is never lost.
     private func deliverOutput(_ data: Data) {
+        var data = data
+        if !pendingEcho.isEmpty {
+            if Date() > echoDeadline { pendingEcho.removeAll() }
+            if !pendingEcho.isEmpty {
+                var dropped = 0
+                while dropped < data.count, let expected = pendingEcho.first,
+                      data[data.index(data.startIndex, offsetBy: dropped)] == expected {
+                    pendingEcho.removeFirst()
+                    dropped += 1
+                }
+                // A mismatch means the echo finished differently than
+                // expected — drop the stale expectation, keep the bytes.
+                if !pendingEcho.isEmpty, dropped < data.count { pendingEcho.removeAll() }
+                data.removeFirst(dropped)
+                guard !data.isEmpty else { return }
+            }
+        }
         if onOutput != nil {
             feedBuffer.append(data)
             scheduleFlush()
@@ -189,9 +218,16 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// A remote `exit` — offline by choice — is never auto-restarted.
     var wantsReconnect: Bool {
         hadLiveSession && !isTerminated
-            && (state.isFailed
+            && ((state.isFailed && !authGated)
                 || (state == .reconnecting && retryTask != nil)
                 || (state == .offline && lastCloseReason == .transportLost))
+    }
+
+    /// Remote `exit` ended the shell — "session ended", distinct from
+    /// a dropped link, for badge/label text. Manual reconnect still
+    /// works; the tmux reattach then resumes the server-side session.
+    var endedRemotely: Bool {
+        state == .offline && lastCloseReason == .remoteExit
     }
 
     init(profile: ServerProfile, connection: SSHConnection, settings: SettingsStore) {
@@ -213,6 +249,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// async path holding an old generation simply doesn't publish.
     private func runConnect() {
         connectGeneration += 1
+        authGated = false
         let gen = connectGeneration
         connectTask?.cancel()
         connectTask = Task { [weak self] in
@@ -250,6 +287,10 @@ final class TerminalSession: ObservableObject, Identifiable {
             enqueueResize()
             sendShellOverride(gen: gen)
             await reattachIfNeeded(gen: gen)
+            // Row icon/label learn the real OS — once, off the hot path.
+            if profile.osID == nil {
+                Task { await engine?.learnOS(for: self) }
+            }
         } catch {
             handleConnectFailure(error, gen: gen)
         }
@@ -257,12 +298,16 @@ final class TerminalSession: ObservableObject, Identifiable {
 
     /// Input queue, consume loop and sticky modifiers belong to the
     /// shell they were captured against — a replacement starts clean.
+    /// The once-per-channel tmux check re-arms here too: every fresh
+    /// shell — manual reconnect or auto-retry alike — gets its
+    /// reattach, and the old `term-*` session is resumed, not leaked.
     private func resetForNewShell() {
         sendChain?.cancel()
         sendChain = nil
         consumeTask?.cancel()
         consumeTask = nil
         modifiers.reset()
+        tmuxChecked = false
     }
 
     /// A failed attempt only publishes when it is still the current
@@ -270,11 +315,23 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// newer state, and its error alert never fires.
     private func handleConnectFailure(_ error: Error, gen: Int) {
         guard !isTerminated, gen == connectGeneration, !Task.isCancelled else { return }
+        // A denied or cancelled biometric prompt gates auth — it is
+        // not a transport failure: no retry budget is spent and the
+        // auto-retry loop never fires on it. The failed state stays
+        // resumable through an explicit reconnect.
+        if case KeyVaultError.biometricDenied = error {
+            authGated = true
+            state = .failed("Authentication cancelled")
+            return
+        }
         // Missing password isn't a failure worth an alert — ask the
-        // user for it, then retry through the same session.
+        // user for it, then retry through the same session. The prompt
+        // queues BEFORE the failed state publishes, so UI watching the
+        // state sees the outstanding ask and doesn't tear the session
+        // down underneath the prompt.
         if case KeyVaultError.keyMaterialMissing = error, case .password = profile.auth {
-            state = .failed(Self.describe(error))
             engine?.authNeeded(self)
+            state = .failed(Self.describe(error))
             return
         }
         // Mid-retry-cycle failure: keep cycling quietly while attempts
@@ -389,7 +446,10 @@ final class TerminalSession: ObservableObject, Identifiable {
         // what keeps a stale attempt from typing into a new shell.
         guard available, !isTerminated, gen == connectGeneration, !Task.isCancelled else { return }
         let name = "term-\(id.uuidString)"
-        send("tmux new-session -A -s \(Self.shQuote(name)) 2>/dev/null || tmux new-session -s \(Self.shQuote(name))\r")
+        // `;` escaped so the shell passes it to tmux verbatim — tmux
+        // chains `set-option` onto the just-attached session, keeping
+        // its green status bar out of the clean terminal view.
+        sendSilently("tmux new-session -A -s \(Self.shQuote(name)) \\; set-option status off 2>/dev/null || tmux new-session -s \(Self.shQuote(name)) \\; set-option status off\r")
     }
 
     /// Probes the remote once per profile (cached on the engine) — exec
@@ -399,6 +459,39 @@ final class TerminalSession: ObservableObject, Identifiable {
             return false
         }
         return !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// One-shot OS probe for the server-row icon/label: `uname -s`
+    /// for the kernel, os-release for the distro identity. Fails
+    /// silently — a missing OS never blocks the shell.
+    func detectOS() async -> (id: String, name: String)? {
+        let probe = "uname -s; . /etc/os-release 2>/dev/null; echo \"${ID:-} ${PRETTY_NAME:-}\""
+        guard let raw = try? await connection.execute(probe) else { return nil }
+        let lines = raw.split(separator: "\n").map(String.init)
+        let kernel = (lines.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !kernel.isEmpty else { return nil }
+        var id = kernel
+        var name: String
+        switch kernel {
+        case "darwin": name = "macOS"
+        case "freebsd": name = "FreeBSD"
+        case "openbsd": name = "OpenBSD"
+        case "netbsd": name = "NetBSD"
+        case "linux": name = "Linux"
+        default: name = kernel.capitalized
+        }
+        if kernel == "linux", lines.count > 1 {
+            let fields = lines[1].split(separator: " ", maxSplits: 1)
+            if let distro = fields.first, !distro.isEmpty {
+                id = String(distro).lowercased()
+                if fields.count > 1, !fields[1].isEmpty {
+                    name = String(fields[1])
+                } else {
+                    name = distro.capitalized
+                }
+            }
+        }
+        return (id, name)
     }
 
     /// `exec` replaces the login shell with the configured override.
@@ -411,7 +504,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         let (path, args) = Self.splitPathAndArgs(override)
         guard !path.isEmpty else { return }
         let suffix = args.isEmpty ? "" : " \(args)"
-        send("exec \(Self.shQuote(path))\(suffix)\r")
+        sendSilently("exec \(Self.shQuote(path))\(suffix)\r")
     }
 
     /// First whitespace run splits the executable path from its
@@ -464,6 +557,22 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// carriage return, and a bare LF is not how a terminal submits.
     func send(_ string: String) {
         send(Self.crNormalize([UInt8](string.utf8))[...])
+    }
+
+    /// Internal wiring (tmux attach, shell override): goes through the
+    /// same ordered chain, but the PTY's echo of these bytes is queued
+    /// for suppression — the terminal shows none of it.
+    func sendSilently(_ string: String) {
+        let bytes = Self.crNormalize([UInt8](string.utf8))
+        var echo = Data()
+        for b in bytes {
+            echo.append(b)
+            // A CR echoes back as CRLF on a cooked pty.
+            if b == 0x0D { echo.append(0x0A) }
+        }
+        pendingEcho.append(echo)
+        echoDeadline = Date().addingTimeInterval(3)
+        send(bytes[...])
     }
 
     /// Typed input: sticky Ctrl/Alt apply here, semantically — Ctrl is
@@ -558,10 +667,9 @@ final class TerminalSession: ObservableObject, Identifiable {
         guard state != .connecting else { return }
         // A pending backoff counts as offline-ish: an explicit trigger
         // (network path restored, app foregrounded) fires it now.
-        guard state == .offline || state.isFailed || (state == .reconnecting && retryTask != nil) else { return }
+        guard state == .offline || (state.isFailed && !authGated) || (state == .reconnecting && retryTask != nil) else { return }
         retryTask?.cancel()
         retryTask = nil
-        tmuxChecked = false
         runConnect()
     }
 
@@ -569,7 +677,6 @@ final class TerminalSession: ObservableObject, Identifiable {
         retryTask?.cancel()
         retryTask = nil
         retryAttempt = 0
-        tmuxChecked = false
         runConnect()
     }
 
@@ -603,10 +710,15 @@ final class TerminalSession: ObservableObject, Identifiable {
             return "Couldn't verify this server"
         case is SSHClient.CommandFailed:
             return "Couldn't open a session"
+        case KeyVaultError.biometricDenied:
+            return "Unlock cancelled"
         case is CancellationError:
             return "Couldn't connect"
         default:
-            return "Couldn't connect"
+            // Surface the real reason — refused vs timed out vs auth —
+            // instead of a generic banner that hides everything.
+            let desc = error.localizedDescription
+            return desc.isEmpty ? "Couldn't connect" : desc
         }
     }
 }

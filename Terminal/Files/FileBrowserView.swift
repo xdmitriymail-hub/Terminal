@@ -28,6 +28,13 @@ private struct FileBrowserContent: View {
     @State private var showImporter = false
     @State private var showTransfers = false
     @State private var overwritePrompt: PendingUpload?
+    @State private var exportFile: ExportItem?
+
+    /// The downloaded file being handed to the system export picker.
+    private struct ExportItem: Identifiable {
+        let id = UUID()
+        let url: URL
+    }
 
     private struct PendingUpload: Identifiable {
         let id = UUID()
@@ -54,7 +61,11 @@ private struct FileBrowserContent: View {
             .sheet(isPresented: $showTransfers) {
                 TransfersView()
             }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
+            .sheet(item: $exportFile) { item in
+                DocumentExportPicker(url: item.url)
+                    .ignoresSafeArea()
+            }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
                 handleImport(result)
             }
             .alert("New Folder", isPresented: $showNewFolder) {
@@ -70,6 +81,7 @@ private struct FileBrowserContent: View {
                 Button("Save") {
                     Task { await vm.rename(file: file, to: renameText) }
                 }
+                .disabled(renameText.trimmingCharacters(in: .whitespaces).isEmpty)
                 Button("Cancel", role: .cancel) {}
             }
             .alert("Delete \(deleting?.name ?? "")?", isPresented: deletePresented, presenting: deleting) { file in
@@ -179,7 +191,9 @@ private struct FileBrowserContent: View {
                 symbol: vm.searchText.isEmpty ? "folder" : "magnifyingglass",
                 text: vm.searchText.isEmpty
                     ? String(localized: "Empty folder")
-                    : String(localized: "No matches")
+                    : String(localized: "No matches"),
+                actionTitle: vm.searchText.isEmpty ? String(localized: "Upload") : nil,
+                action: vm.searchText.isEmpty ? { showImporter = true } : nil
             )
         } else {
             fileList
@@ -326,17 +340,22 @@ private struct FileBrowserContent: View {
             )
         }
         ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                Haptics.tap()
+                showImporter = true
+            } label: {
+                Image(systemName: "arrow.up.doc")
+            }
+            .accessibilityLabel("Upload")
+            .accessibilityIdentifier("uploadButton")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button {
                     newFolderName = ""
                     showNewFolder = true
                 } label: {
                     Label("New Folder", systemImage: "folder.badge.plus")
-                }
-                Button {
-                    showImporter = true
-                } label: {
-                    Label("Upload", systemImage: "arrow.up.doc")
                 }
                 Divider()
                 Button {
@@ -386,8 +405,33 @@ private struct FileBrowserContent: View {
         }
     }
 
+    /// Download first, then hand the file to the system export picker —
+    /// that's the "save anywhere" flow, iCloud Drive included.
+    private func saveToFiles(_ file: RemoteFile) {
+        Haptics.tap()
+        Task {
+            guard let svc = try? await vm.service() else {
+                vm.error = String(localized: "Couldn't download")
+                Haptics.failed()
+                return
+            }
+            TransferManager.shared.download(file: file, via: svc) { url in
+                exportFile = ExportItem(url: url)
+            }
+        }
+    }
+
     private func handleImport(_ result: Result<URL, Error>) {
-        guard case .success(let url) = result else { return }
+        guard case .success(let url) = result else {
+            // A cancelled pick returns .failure too — only surface real
+            // errors, not the user backing out of the picker.
+            if case .failure(let error) = result,
+               (error as NSError).code != NSUserCancelledError {
+                vm.error = String(localized: "Couldn't open that file")
+                Haptics.failed()
+            }
+            return
+        }
         Task {
             guard let svc = try? await vm.service() else {
                 vm.error = String(localized: "Couldn't upload")
@@ -506,6 +550,11 @@ private struct FileBrowserContent: View {
                 startDownload(file)
             } label: {
                 Label("Download", systemImage: "arrow.down.circle")
+            }
+            Button {
+                saveToFiles(file)
+            } label: {
+                Label("Save to Files", systemImage: "folder")
             }
         }
         Button {
@@ -631,4 +680,18 @@ private struct PermissionsSheet: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
     }
+}
+
+/// System "Save to Files" export — a copy of the downloaded file is
+/// offered to iCloud Drive, On My iPhone and every installed provider.
+private struct DocumentExportPicker: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+        picker.allowsMultipleSelection = false
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
 }

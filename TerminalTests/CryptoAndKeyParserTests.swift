@@ -111,6 +111,30 @@ final class CryptoAndKeyParserTests: XCTestCase {
         XCTAssertEqual(parsed.publicKeyLine, p256PublicLine)
     }
 
+    // MARK: - Generated public key lines
+
+    /// KeyVault's ed25519 generation path: ed25519PublicKeyBlob already
+    /// produces the complete wire blob, so the line must be single-
+    /// encoded — "type base64(blob)", not base64 of a re-wrapped blob.
+    /// authorized_keys rejects the doubly-wrapped form.
+    func testGeneratedEd25519PublicLineIsSingleEncoded() throws {
+        let privateKey = CryptoKit.Curve25519.Signing.PrivateKey()
+        let blob = SSHWireWriter.ed25519PublicKeyBlob(privateKey.publicKey.rawRepresentation)
+        let line = SSHWireWriter.publicKeyLine(type: "ssh-ed25519", blob: blob)
+
+        XCTAssertTrue(line.hasPrefix("ssh-ed25519 "))
+        let parts = line.split(separator: " ")
+        XCTAssertEqual(parts.count, 2)
+        let decoded = try XCTUnwrap(Data(base64Encoded: String(parts[1])))
+        XCTAssertEqual(decoded, blob)
+
+        // And the blob itself is wire-decodable: string type + string key.
+        var reader = SSHWireReader(decoded)
+        XCTAssertEqual(try reader.readText(), "ssh-ed25519")
+        XCTAssertEqual(try reader.readString(), privateKey.publicKey.rawRepresentation)
+        XCTAssertEqual(reader.remaining, 0)
+    }
+
     func testTamperedFixtureRejected() throws {
         // Flip a byte deep inside the private section: checkint no
         // longer matches — parser must refuse, not import a broken key.

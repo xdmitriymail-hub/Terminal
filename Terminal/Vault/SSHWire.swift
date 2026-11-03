@@ -64,12 +64,12 @@ struct SSHWireWriter {
 }
 
 extension SSHWireWriter {
-    /// Encodes an OpenSSH public key line "type base64".
+    /// Encodes an OpenSSH public key line "type base64". `blob` is
+    /// already the complete SSH wire blob (ed25519PublicKeyBlob /
+    /// ecdsaPublicKeyBlob output) and is base64'd as-is — wrapping it
+    /// in another wire buffer would double-encode it.
     static func publicKeyLine(type: String, blob: Data) -> String {
-        var w = SSHWireWriter()
-        w.writeText(type)
-        w.writeString(blob)
-        return "\(type) \(w.data.base64EncodedString())"
+        "\(type) \(blob.base64EncodedString())"
     }
 
     static func ed25519PublicKeyBlob(_ publicKeyBytes: Data) -> Data {

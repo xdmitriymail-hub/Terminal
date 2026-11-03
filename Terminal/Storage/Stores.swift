@@ -348,12 +348,40 @@ final class KeysStore: ObservableObject {
         unlockObserver = onProtectedDataUnlock { [weak self] in
             self?.reloadAfterUnlock()
         }
+        repairPublicKeyLines()
     }
 
     func reloadAfterUnlock() {
         guard store.retryAfterUnlock() else { return }
         keys = store.load()
         storageError = store.lastError
+        repairPublicKeyLines()
+    }
+
+    /// Keys generated before the publicKeyLine fix carry a double-
+    /// wrapped blob — `type base64(wire(type, wire(blob)))`. Unwrap
+    /// one layer back to `type base64(blob)`; anything not matching
+    /// that exact shape is left alone (imported keys were never bad).
+    private func repairPublicKeyLines() {
+        var repaired = keys
+        var changed = false
+        for i in repaired.indices {
+            let line = repaired[i].publicKeyOpenSSH
+            let parts = line.split(separator: " ")
+            guard parts.count >= 2,
+                  let outer = Data(base64Encoded: String(parts[1])) else { continue }
+            var reader = SSHWireReader(outer)
+            guard let outerType = try? reader.readText(),
+                  outerType == parts[0],
+                  let inner = try? reader.readString(),
+                  reader.remaining == 0,
+                  let innerType = try? SSHWireReader(inner).readText(),
+                  innerType == parts[0] else { continue }
+            repaired[i].publicKeyOpenSSH = "\(parts[0]) \(inner.base64EncodedString())"
+            changed = true
+        }
+        guard changed, store.save(repaired) else { return }
+        keys = repaired
     }
 
     @discardableResult

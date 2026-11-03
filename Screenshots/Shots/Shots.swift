@@ -22,7 +22,9 @@ final class Shots: XCTestCase {
         shot("01-onboarding")
 
         // The connect form — fields are found by placeholder/label.
-        type(into: ["server.example.com", "Host"], "localhost")
+        // 127.0.0.1, not localhost: a ::1 resolution while sshd listens
+        // on IPv4 only would fail before the host-key stage.
+        type(into: ["server.example.com", "Host"], "127.0.0.1")
         type(into: ["root", "Username"], "shotbot")
         type(into: ["Optional", "Password"], "Term1n4lSh0ts", secure: true)
 
@@ -33,7 +35,7 @@ final class Shots: XCTestCase {
 
         // If the stored credential didn't reach the keychain, the app
         // asks again — fill the retry dialog so the flow continues.
-        let retryField = app.secureTextFields["localhost"].firstMatch
+        let retryField = app.secureTextFields.firstMatch
         if retryField.waitForExistence(timeout: 6) {
             retryField.tap()
             nap(1)
@@ -56,7 +58,14 @@ final class Shots: XCTestCase {
 
         // Summon the keyboard to show the accessory bar.
         app.descendants(matching: .any)["terminalSurface"].firstMatch.tap()
-        nap(4)
+        nap(2)
+        // iOS can overlay its slide-to-type tutorial the first time the
+        // keyboard appears — dismiss it so the accessory shows.
+        let tipsContinue = app.buttons["Continue"].firstMatch
+        if tipsContinue.waitForExistence(timeout: 4) {
+            tipsContinue.tap()
+            nap(2)
+        }
         shot("03-keyboard")
 
         // Type a command so the shell isn't empty in the shot.
@@ -89,7 +98,7 @@ final class Shots: XCTestCase {
         nap(2)
         shot("07-settings")
 
-        app.descendants(matching: .any)["Theme"].firstMatch.tap()
+        tapAny(["Theme", "paintpalette"])
         nap(2)
         shot("08-theme-picker")
 
